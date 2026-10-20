@@ -334,10 +334,14 @@ export class MemoryManager {
     if (observationTokens < config.memory.reflectAfterTokens) return
     if (!this.gate(`reflector:${sessionID}`, config.memory.retryGateSeconds)) return
 
-    const listed = state.observations
-      .slice(-60)
-      .map((observation) => `- [${observation.id}] ${observation.text}`)
-      .join("\n")
+    // Upstream keeps a reflector cursor: each observation is reviewed once.
+    // Without it the reflector re-reads the same window on every run and
+    // re-crystallises it, so duplicates pile up and crowd out new insights.
+    const unreviewed = state.observations.filter((observation) => !state.reflectedIds.has(observation.id))
+    if (unreviewed.length === 0) return
+    const review = unreviewed.slice(-60)
+
+    const listed = review.map((observation) => `- [${observation.id}] ${observation.text}`).join("\n")
     const prompt = `${REFLECTOR_PROMPT}\n\n---\nOBSERVATIONS\n${listed}\n---`
 
     const result = await runWithFallbacks({
@@ -358,18 +362,46 @@ export class MemoryManager {
     }
 
     const parsed = parseJson<{ reflections?: string[] }>(result.text)
-    const lines = (parsed?.reflections ?? []).map((line) => line.trim()).filter(Boolean)
-    if (lines.length === 0) return
+    if (parsed === undefined) {
+      // Unreadable output: the review did not happen, so the cursor must not
+      // move - the same rule the observer follows.
+      this.deps.log("reflector-unreadable", { sessionID, model: result.model })
+      return
+    }
+
+    // The review is done either way: the model saw these observations. The
+    // cursor is written after the reflections, so a failed write cannot lose
+    // the review.
+    const known = new Set(state.reflections.map((reflection) => reflection.text.trim().toLowerCase()))
+    const lines = (parsed.reflections ?? [])
+      .map((line) => line.trim())
+      .filter((line) => {
+        if (!line) return false
+        const key = line.toLowerCase()
+        if (known.has(key)) return false
+        known.add(key)
+        return true
+      })
 
     const now = new Date().toISOString()
+    const evidence = review.slice(-10).map((observation) => observation.id)
     const reflections: Reflection[] = lines.map((text, i) => ({
       id: `ref_${Date.now().toString(36)}_${i}`,
       ts: now,
       text,
-      evidence: state.observations.slice(-10).map((observation) => observation.id),
+      evidence,
     }))
-    this.ledgerFor(sessionID).append(sessionID, reflections.map((reflection) => ({ kind: "reflection", ...reflection })))
-    this.deps.log("reflector", { sessionID, count: reflections.length, model: result.model })
+    const ledger = this.ledgerFor(sessionID)
+    if (reflections.length > 0) {
+      ledger.append(sessionID, reflections.map((reflection) => ({ kind: "reflection", ...reflection })))
+    }
+    ledger.append(sessionID, [{ kind: "reflected", ids: review.map((observation) => observation.id), ts: now }])
+    this.deps.log("reflector", {
+      sessionID,
+      count: reflections.length,
+      model: result.model,
+      reviewed: review.length,
+    })
   }
 
   /**

@@ -178,6 +178,100 @@ describe("memory block rendering", () => {
   })
 })
 
+describe("reflector coverage", () => {
+  test("each observation is reviewed once", async () => {
+    // The retry gate must be off, or the second run would never attempt a
+    // reflection and the test would pass for the wrong reason.
+    const h = harness({ reflectAfterTokens: 1, retryGateSeconds: 0 })
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "the parser lives in src/parser.ts",
+        tokens: 10,
+      },
+    ])
+    h.setResponse('{"reflections":["the project has a custom parser"]}')
+
+    await h.manager.onTurnEnd("s1")
+    expect(h.ledger.read("s1").reflections).toHaveLength(1)
+
+    // A second run must not review the same observation again.
+    await h.manager.onTurnEnd("s1")
+    expect(h.ledger.read("s1").reflections).toHaveLength(1)
+    expect(h.prompts.filter((p) => p.includes("OBSERVATIONS"))).toHaveLength(1)
+  })
+
+  test("an unreadable answer leaves the observations unreviewed", async () => {
+    const h = harness({ reflectAfterTokens: 1 })
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "a fact",
+        tokens: 10,
+      },
+    ])
+    h.setResponse("prose, not json")
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.reflections).toHaveLength(0)
+    expect(state.reflectedIds.has("o1")).toBe(false)
+  })
+
+  test("duplicate reflections are not stored twice", async () => {
+    const h = harness({ reflectAfterTokens: 1, retryGateSeconds: 0 })
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "a fact",
+        tokens: 10,
+      },
+    ])
+    h.setResponse('{"reflections":["the same insight"]}')
+
+    await h.manager.onTurnEnd("s1")
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o2",
+        ts: "2026-01-01T00:01:00.000Z",
+        text: "another fact",
+        tokens: 10,
+      },
+    ])
+    await h.manager.onTurnEnd("s1")
+
+    const reflections = h.ledger.read("s1").reflections
+    expect(reflections.filter((r) => r.text === "the same insight")).toHaveLength(1)
+  })
+
+  test("the cursor survives a ledger compaction", async () => {
+    const directory = join(temp(), "memory")
+    const ledger = new MemoryLedger(directory)
+    ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "a fact",
+        tokens: 10,
+      },
+      { kind: "reflected", ids: ["o1"], ts: "2026-01-01T00:00:00.000Z" },
+    ])
+    ledger.compact("s1")
+
+    const state = new MemoryLedger(directory).read("s1")
+    expect(state.reflectedIds.has("o1")).toBe(true)
+  })
+})
+
 describe("summary memory block", () => {
   test("carries both the reflections and the observations", () => {
     const h = harness()

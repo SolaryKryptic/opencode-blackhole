@@ -82,6 +82,63 @@ describe("runWithFallbacks", () => {
     })
     expect(result?.text).toBe("session answer")
   })
+
+  test("a bad credential falls through to the next candidate", async () => {
+    // A deterministic failure (bad key, unknown model, rejected payload) must
+    // still engage the fallback chain: upstream cools the broken model down
+    // and moves on, so the session model remains a usable last resort.
+    const result = await runWithFallbacks({
+      models: [model("a")],
+      prompt: "p",
+      call: async (m) => {
+        if (m.id === "a") throw new Error("401 Unauthorized: invalid api key")
+        return "session answer"
+      },
+      sessionModel: model("session"),
+      sessionFallback: true,
+      cooldowns: freshCooldowns(),
+      cooldownSeconds: 60,
+    })
+    expect(result?.text).toBe("session answer")
+    expect(result?.model.id).toBe("session")
+    expect(result?.skipped).toContainEqual(model("a"))
+  })
+
+  test("a broken credential is cooled down so the cycle is not burned again", async () => {
+    const cooldowns = freshCooldowns()
+    await runWithFallbacks({
+      models: [model("a")],
+      prompt: "p",
+      call: async () => {
+        throw new Error("unauthorized")
+      },
+      sessionModel: model("session"),
+      sessionFallback: true,
+      cooldowns,
+      cooldownSeconds: 60,
+    })
+    expect(cooldowns.active(model("a"))).toBeDefined()
+  })
+
+  test("an unknown model is skipped without a cooldown", async () => {
+    const cooldowns = freshCooldowns()
+    const result = await runWithFallbacks({
+      models: [model("a")],
+      prompt: "p",
+      call: async (m) => {
+        if (m.id === "a") throw new Error("Model not found: nope/none")
+        return "session answer"
+      },
+      sessionModel: model("session"),
+      sessionFallback: true,
+      cooldowns,
+      cooldownSeconds: 60,
+    })
+    expect(result?.model.id).toBe("session")
+    // It will still be missing next time, so cooling it down would only
+    // clutter the store.
+    expect(cooldowns.active(model("a"))).toBeUndefined()
+  })
 })
 
 describe("isRetryable", () => {

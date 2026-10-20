@@ -174,11 +174,31 @@ export default Plugin.define({
       log("retention-failed", { error: String(err) })
     }
 
+    /**
+     * The model each session is currently using.
+     *
+     * `ctx.session.get()` does not carry the model, so it is taken from the
+     * request itself: the context hook and the compaction hook both see the
+     * model the session is running with. Without this the session-model
+     * fallback could never fire.
+     */
+    const sessionModels = new Map<string, { providerID: string; id: string }>()
+    const rememberModel = (sessionID: string, model: unknown) => {
+      const ref = model as { providerID?: string; id?: string } | undefined
+      if (ref?.providerID && ref?.id) sessionModels.set(sessionID, { providerID: ref.providerID, id: ref.id })
+    }
+
     const sessionModel = async (sessionID: string) => {
+      const known = sessionModels.get(sessionID)
+      if (known) return known
       try {
         const info: any = await ctx.session.get({ sessionID })
         const model = info?.model
-        if (model?.providerID && model?.id) return { providerID: model.providerID, id: model.id }
+        if (model?.providerID && model?.id) {
+          const ref = { providerID: model.providerID, id: model.id }
+          sessionModels.set(sessionID, ref)
+          return ref
+        }
       } catch {
         // Fall through: the session model is optional.
       }
@@ -205,6 +225,7 @@ export default Plugin.define({
     // memory into the system prompt.
     await ctx.session.hook("context", async (event) => {
       if (!config().enabled) return
+      rememberModel(event.sessionID, (event as any).model)
       try {
         const { store } = await ensure(event.sessionID)
         captureRequest(store, event.sessionID, event.messages as unknown[])
@@ -258,6 +279,8 @@ export default Plugin.define({
 
       const settings = config()
       if (!settings.enabled || !settings.compaction.enabled) return
+
+      rememberModel(event.sessionID, (event as any).model)
 
       const { store } = await ensure(event.sessionID)
 

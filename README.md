@@ -117,6 +117,17 @@ tier, give OpenRouter a key; to keep them off your main model entirely, set
 }
 ```
 
+The workers run through OpenCode's own generation API, so they use the
+credentials you have connected in OpenCode — there is no second key to
+configure. Two caveats:
+
+- OpenCode's **free-tier models cannot be called from a plugin** ("OpenCode's
+  free tier can only be used from within OpenCode"), so if your session model is
+  one of those, it is not usable as the fallback. Use a provider model.
+- A worker model that is not in the catalog is skipped without a cooldown; one
+  that fails for a fixable reason (bad key, rejected payload) is cooled down
+  and the chain moves on to the next candidate.
+
 ---
 
 ## Configuration
@@ -184,7 +195,9 @@ what a worker actually saw — so nothing is lost, it is just observed later.
 The observer is shown at most `observerChunkMaxTokens` of the pending window at
 a time (upstream's limit). The chunk it reads is covered; the rest stays
 pending for the next round, and an answer the plugin cannot parse leaves the
-window pending rather than discarding it.
+window pending rather than discarding it. The reflector keeps its own cursor:
+each observation is crystallised once, so repeated runs cannot pile up
+duplicate reflections.
 
 Set `"sessionFallback": false` if you would rather the workers stop than run on
 your session's model: then a worker with no reachable model is skipped and the

@@ -36,6 +36,8 @@ export type LedgerEntry =
   | ({ kind: "reflection" } & Reflection)
   | { kind: "dropped"; id: string; ts: string }
   | { kind: "cursor"; observedThrough: number; ts: string; dropped?: number }
+  /** Observations the reflector has already reviewed. */
+  | { kind: "reflected"; ids: string[]; ts: string }
 
 export interface LedgerState {
   observations: Observation[]
@@ -45,6 +47,8 @@ export interface LedgerState {
   droppedCount: number
   /** The transcript index the observer has read up to. */
   observedThrough: number
+  /** The observations the reflector has already crystallized. */
+  reflectedIds: Set<string>
 }
 
 export interface MemoryLedgerOptions {
@@ -68,6 +72,7 @@ const emptyState = (): LedgerState => ({
   dropped: [],
   droppedCount: 0,
   observedThrough: 0,
+  reflectedIds: new Set(),
 })
 
 export class MemoryLedger {
@@ -138,6 +143,8 @@ export class MemoryLedger {
     } else if (entry.kind === "cursor") {
       state.observedThrough = entry.observedThrough
       if (typeof entry.dropped === "number") state.droppedCount = Math.max(state.droppedCount, entry.dropped)
+    } else if (entry.kind === "reflected") {
+      for (const id of entry.ids) state.reflectedIds.add(id)
     }
   }
 
@@ -180,6 +187,17 @@ export class MemoryLedger {
         dropped: state.droppedCount,
       } as LedgerEntry),
     )
+    // The reflector's cursor has to survive the rewrite, or the reflector
+    // would review every observation again after a compaction.
+    if (state.reflectedIds.size > 0) {
+      lines.push(
+        JSON.stringify({
+          kind: "reflected",
+          ids: [...state.reflectedIds],
+          ts: new Date().toISOString(),
+        } as LedgerEntry),
+      )
+    }
 
     try {
       writeFileSync(path, lines.join("\n") + "\n")

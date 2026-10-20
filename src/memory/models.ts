@@ -62,9 +62,23 @@ export class CooldownStore {
 /** Errors worth retrying on another model rather than skipping the stage. */
 const RETRYABLE = /rate.?limit|429|too many requests|timeout|timed out|overload|503|502|500|bad gateway|service unavailable|fetch failed|econn|network|stream (?:error|closed)|aborted/i
 
+/**
+ * A model the catalog does not know.
+ *
+ * Cooling such a model down would only clutter the store: it will still be
+ * missing next time. Upstream skips it for the same reason.
+ */
+const UNKNOWN_MODEL = /model .*(not found|does not exist|not available|unavailable|unknown)|no such model|model_not_found|modelselectionerror/i
+
 export const isRetryable = (error: unknown): boolean => {
   const text = error instanceof Error ? `${error.message} ${error.stack ?? ""}` : String(error)
   return RETRYABLE.test(text)
+}
+
+/** True when the model itself is unknown to the provider catalog. */
+export const isUnknownModel = (error: unknown): boolean => {
+  const text = error instanceof Error ? `${error.message} ${error.stack ?? ""}` : String(error)
+  return UNKNOWN_MODEL.test(text)
 }
 
 export interface RunResult {
@@ -90,8 +104,14 @@ export interface RunOptions {
 }
 
 /**
- * Try each model in the chain until one answers. A model in cooldown is
- * skipped; the session model is only tried when explicitly allowed.
+ * Try each model in the chain until one answers.
+ *
+ * A model in cooldown is skipped. Every failure moves on to the next
+ * candidate - including a deterministic one (bad credentials, an unknown
+ * model, a rejected payload), which upstream also cools down rather than
+ * burning every cycle on a model that cannot work. That is what makes the
+ * session model a real last resort: a dead worker credential falls through to
+ * it instead of ending the stage.
  */
 export const runWithFallbacks = async (options: RunOptions): Promise<RunResult | undefined> => {
   const chain = [...options.models]
@@ -112,13 +132,17 @@ export const runWithFallbacks = async (options: RunOptions): Promise<RunResult |
     } catch (error) {
       const retryable = isRetryable(error)
       options.onFailure?.(model, error, retryable)
-      if (retryable) {
-        options.cooldowns.cool(model, String(error).slice(0, 200), options.cooldownSeconds)
+      if (isUnknownModel(error)) {
+        // Not in the catalog: skip it, but do not cool it down - it will
+        // still be missing next time.
         skipped.push(model)
         continue
       }
-      // A non-retryable failure (bad model id, auth) is fatal for this stage.
-      return undefined
+      // Both transient and deterministic failures cool the model down and
+      // hand over to the next candidate.
+      options.cooldowns.cool(model, String(error).slice(0, 200), options.cooldownSeconds)
+      skipped.push(model)
+      continue
     }
   }
   return undefined

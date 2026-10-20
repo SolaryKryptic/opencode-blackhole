@@ -17,7 +17,7 @@ describe("loadConfig", () => {
     // Upstream pi-blackhole falls back to the session's model by default.
     expect(config.memory.sessionFallback).toBe(true)
     expect(config.memory.observeAfterTokens).toBe(15_000)
-    expect(config.memory.reflectAfterTokens).toBe(25_000)
+    expect(config.memory.reflectAfterTokens).toBe(15_000)
   })
 
   test("plugin options win over the project file", () => {

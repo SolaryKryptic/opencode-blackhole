@@ -154,7 +154,11 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
       maxBriefCharsCeiling: Math.round(briefChars * 1.5),
       briefCharsPerBlock: Math.round(15 * charsPerToken),
       maxBlocks: 64,
-      preserveRecentBlocks: 3,
+      // Upstream keeps the newest 16 blocks whatever their score
+      // (rank.ts: `options.preserveRecentBlocks ?? DEFAULT_RECENT_BLOCKS`).
+      // A smaller value lets older, higher-scoring blocks - bug reports and
+      // diffs - crowd out the turns the brief exists to preserve.
+      preserveRecentBlocks: 16,
     },
   })
 

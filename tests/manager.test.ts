@@ -270,6 +270,47 @@ describe("reflector coverage", () => {
     const state = new MemoryLedger(directory).read("s1")
     expect(state.reflectedIds.has("o1")).toBe(true)
   })
+  test("the trigger counts unreviewed observations, not the whole pool", async () => {
+    // A pool that is mostly already crystallised must not re-trigger the
+    // reflector: the trigger is the pending amount.
+    const h = harness({ reflectAfterTokens: 100, retryGateSeconds: 0 })
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "an old fact",
+        tokens: 10,
+      },
+      { kind: "reflected", ids: ["o1"], ts: "2026-01-01T00:00:00.000Z" },
+    ])
+    h.setResponse('{"reflections":["something new"]}')
+
+    await h.manager.onTurnEnd("s1")
+
+    // Nothing pending, so the reflector must not run.
+    expect(h.prompts.filter((p) => p.includes("OBSERVATIONS"))).toHaveLength(0)
+    expect(h.ledger.read("s1").reflections).toHaveLength(0)
+  })
+
+  test("a pool under the pool cap can still trigger the reflector", async () => {
+    // The trigger must sit below the pool cap, or the reflector is dead.
+    const h = harness({ reflectAfterTokens: 50, observationsPoolMaxTokens: 100 })
+    h.ledger.append("s1", [
+      {
+        kind: "observation",
+        id: "o1",
+        ts: "2026-01-01T00:00:00.000Z",
+        text: "a fact",
+        tokens: 60,
+      },
+    ])
+    h.setResponse('{"reflections":["a durable insight"]}')
+
+    await h.manager.onTurnEnd("s1")
+
+    expect(h.ledger.read("s1").reflections).toHaveLength(1)
+  })
 })
 
 describe("summary memory block", () => {

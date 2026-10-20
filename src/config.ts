@@ -50,7 +50,13 @@ export interface BlackholeConfig {
     sessionFallback: boolean
     /** Run the observer once the session has grown by this many tokens. */
     observeAfterTokens: number
-    /** Run the reflector once this many observation tokens are pending. */
+    /**
+     * Run the reflector once this many observation tokens are pending.
+     *
+     * Upstream uses 25,000, but its observation cap bounds the *projection*
+     * rather than the store. This port's cap is a hard delete, so the trigger
+     * has to sit below it or the reflector could never fire.
+     */
     reflectAfterTokens: number
     /**
      * The most the observer is shown in one round.
@@ -126,7 +132,7 @@ export const DEFAULTS: BlackholeConfig = {
      */
     sessionFallback: true,
     observeAfterTokens: 15_000,
-    reflectAfterTokens: 25_000,
+    reflectAfterTokens: 15_000,
     observerChunkMaxTokens: 40_000,
     observationsPoolMaxTokens: 20_000,
     retryGateSeconds: 30,

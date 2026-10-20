@@ -330,8 +330,6 @@ export class MemoryManager {
   private async reflect(sessionID: string, config: BlackholeConfig) {
     const state = this.ledgerFor(sessionID).read(sessionID)
     if (state.observations.length === 0) return
-    const observationTokens = state.observations.reduce((sum, o) => sum + o.tokens, 0)
-    if (observationTokens < config.memory.reflectAfterTokens) return
     if (!this.gate(`reflector:${sessionID}`, config.memory.retryGateSeconds)) return
 
     // Upstream keeps a reflector cursor: each observation is reviewed once.
@@ -339,6 +337,13 @@ export class MemoryManager {
     // re-crystallises it, so duplicates pile up and crowd out new insights.
     const unreviewed = state.observations.filter((observation) => !state.reflectedIds.has(observation.id))
     if (unreviewed.length === 0) return
+
+    // The trigger counts the observations still waiting to be crystallised,
+    // not the whole pool - otherwise a pool that is mostly already
+    // crystallised would keep re-triggering the reflector.
+    const pendingTokens = unreviewed.reduce((sum, observation) => sum + observation.tokens, 0)
+    if (pendingTokens < config.memory.reflectAfterTokens) return
+
     const review = unreviewed.slice(-60)
 
     const listed = review.map((observation) => `- [${observation.id}] ${observation.text}`).join("\n")

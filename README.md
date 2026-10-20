@@ -294,12 +294,28 @@ them forever, or a short window to keep them less.
 
 ```sh
 bun install
-bun run check      # typecheck + tests
+bun run check      # typecheck + tests + build
+bun run dev        # rebuild the bundle on every source change
+bun run bench      # where the time goes in the capture path
+```
+
+**The plugin loads the bundle, not the sources.** A change under `src/` only
+reaches a running OpenCode after `bun run build` (or `bun run dev`, which does
+it for you); OpenCode then reloads the plugin by itself — no restart needed.
+Changing the root `index.ts` takes effect immediately, since it is part of the
+plugin's own file graph.
+
+To try a local build in OpenCode, point a plugin file at it:
+
+```ts
+// ~/.config/opencode/plugins/blackhole.ts
+export { default } from "/path/to/opencode-blackhole/index.ts"
 ```
 
 The compaction engine lives in `src/vcc/` — a port of pi-vcc with the Pi
 couplings removed, kept as a separate module so upstream fixes can be merged
-rather than re-implemented. `LICENSE.vendor` carries its MIT license.
+rather than re-implemented. `LICENSE.vendor` carries its MIT license, and
+`src/vcc/README.md` records exactly what diverges from upstream.
 
 ## License
 

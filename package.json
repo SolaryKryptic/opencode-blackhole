@@ -35,6 +35,7 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin",
+    "dev": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin --watch",
     "test": "bun test ./tests",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test ./tests && bun run build",

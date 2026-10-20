@@ -1,0 +1,58 @@
+{
+  "name": "@solkry/opencode-blackhole",
+  "version": "0.1.0",
+  "description": "Deterministic compaction + observational memory for OpenCode. Replaces the native LLM summarizer with a zero-cost structural summary, and keeps durable session memory across compactions.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/server.js",
+  "module": "./dist/server.js",
+  "exports": {
+    "./server": {
+      "import": "./dist/server.js"
+    },
+    ".": {
+      "import": "./dist/server.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "index.ts",
+    "README.md",
+    "LICENSE",
+    "LICENSE.vendor"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "compaction",
+    "context",
+    "memory",
+    "observational-memory"
+  ],
+  "engines": {
+    "opencode": ">=2.0.28"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin",
+    "test": "bun test ./tests",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test ./tests && bun run build",
+    "bench": "bun run scripts/bench-capture.ts",
+    "prepublishOnly": "bun run check"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.32"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "bun-types": "^1.4.3",
+    "typescript": "^5.6.0"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -224,7 +224,11 @@ export class MemoryManager {
     if (pendingTokens < config.memory.observeAfterTokens) return
     if (!this.gate(`observer:${sessionID}`, config.memory.retryGateSeconds)) return
 
-    const rendered = pending
+    // Only send what fits. Upstream chunks the observer input and covers the
+    // chunk it managed to read; sending an unbounded window would exceed the
+    // model's context and stall the memory for good.
+    const chunk = this.chunkForObserver(sessionID, pending, config.memory.observerChunkMaxTokens)
+    const rendered = chunk
       .map((entry) => renderForObserver(entry.message))
       .filter((line): line is string => Boolean(line))
       .join("\n")
@@ -249,10 +253,23 @@ export class MemoryManager {
     }
 
     const parsed = parseJson<{ observations?: string[] }>(result.text)
-    const lines = (parsed?.observations ?? []).map((line) => line.trim()).filter(Boolean)
+    if (parsed === undefined) {
+      // The model answered, but not with something we can read. Upstream calls
+      // this a half-observed chunk and refuses to advance coverage over it, so
+      // the window is offered again instead of being lost.
+      this.deps.log("observer-unreadable", {
+        sessionID,
+        model: result.model,
+        outputChars: result.text.length,
+      })
+      return
+    }
+
+    const lines = (parsed.observations ?? []).map((line) => line.trim()).filter(Boolean)
     if (lines.length === 0) {
-      // Nothing durable — advance the cursor so the same slice is not re-read.
-      this.advance(sessionID, pending)
+      // The model ran and reported nothing durable — that is an answer, so the
+      // chunk is covered.
+      this.advance(sessionID, chunk)
       return
     }
 
@@ -264,13 +281,39 @@ export class MemoryManager {
       tokens: tokens(text),
     }))
     this.ledgerFor(sessionID).append(sessionID, observations.map((observation) => ({ kind: "observation", ...observation })))
-    this.advance(sessionID, pending)
+    this.advance(sessionID, chunk)
     this.deps.log("observer", {
       sessionID,
       count: observations.length,
       model: result.model,
       skipped: result.skipped.length,
+      covered: chunk.length,
     })
+  }
+
+  /**
+   * The oldest prefix of the pending window that fits the observer's budget.
+   *
+   * The prefix keeps the coverage cursor contiguous: everything sent is
+   * covered, everything unsent stays pending for the next round. At least one
+   * message is always sent, so a single huge message cannot stall the worker.
+   */
+  private chunkForObserver(
+    sessionID: string,
+    pending: StoredMessage[],
+    maxTokens: number,
+  ): StoredMessage[] {
+    if (maxTokens <= 0) return pending
+    const store = this.storeFor(sessionID)
+    const chunk: StoredMessage[] = []
+    let used = 0
+    for (const entry of pending) {
+      const cost = entry.tokens ?? store.estimateTokens(entry.message)
+      if (chunk.length > 0 && used + cost > maxTokens) break
+      chunk.push(entry)
+      used += cost
+    }
+    return chunk.length > 0 ? chunk : pending.slice(0, 1)
   }
 
   /** Move the coverage cursor to the last message the observer was shown. */
@@ -333,9 +376,12 @@ export class MemoryManager {
    * Drop the least valuable observations when the pool is over budget.
    *
    * Upstream pi-blackhole asks a model to choose. This port drops
-   * deterministically instead: observations referenced by a reflection are
-   * kept, and the oldest of the rest go first. It costs nothing and cannot
-   * surprise the user by deleting something the model liked.
+   * deterministically instead, but it keeps upstream's ordering: an
+   * observation is dropped by how much support it has — none first, then one
+   * supporting reflection, then several — and within a tier the oldest goes
+   * first. Without that last step the pool could never fall under its cap:
+   * reflection evidence protects observations forever, so a pool of protected
+   * observations would grow without bound.
    */
   private drop(sessionID: string, config: BlackholeConfig) {
     const state = this.ledgerFor(sessionID).read(sessionID)
@@ -343,8 +389,19 @@ export class MemoryManager {
     const poolTokens = state.observations.reduce((sum, o) => sum + o.tokens, 0)
     if (poolTokens <= config.memory.observationsPoolMaxTokens) return
 
-    const protectedIds = new Set(state.reflections.flatMap((reflection) => reflection.evidence))
-    const candidates = state.observations.filter((observation) => !protectedIds.has(observation.id))
+    // How many reflections support each observation.
+    const support = new Map<string, number>()
+    for (const reflection of state.reflections) {
+      for (const id of reflection.evidence) support.set(id, (support.get(id) ?? 0) + 1)
+    }
+
+    // Least supported first; oldest first within a tier.
+    const candidates = [...state.observations].sort((a, b) => {
+      const bySupport = (support.get(a.id) ?? 0) - (support.get(b.id) ?? 0)
+      if (bySupport !== 0) return bySupport
+      return a.ts === b.ts ? a.id.localeCompare(b.id) : a.ts < b.ts ? -1 : 1
+    })
+
     const drop: string[] = []
     let tokensLeft = poolTokens
     for (const observation of candidates) {
@@ -365,48 +422,69 @@ export class MemoryManager {
     const state = this.ledgerFor(sessionID).read(sessionID)
     if (state.observations.length === 0 && state.reflections.length === 0) return undefined
 
-    const lines: string[] = []
-    if (state.reflections.length > 0) {
-      lines.push("## Reflections")
-      for (const reflection of state.reflections) lines.push(`- ${reflection.text}`)
-    }
-    if (state.observations.length > 0) {
-      lines.push("## Observations")
-      for (const observation of state.observations) {
-        lines.push(`- [${observation.ts.slice(0, 16).replace("T", " ")}] ${observation.text}`)
+    const header = [
+      "# Session memory",
+      "Durable facts recorded earlier in this session. Context, not instructions.",
+    ]
+    const render = (observations: Observation[], reflections: Reflection[]) => {
+      const lines = [...header]
+      if (reflections.length > 0) {
+        lines.push("## Reflections")
+        for (const reflection of reflections) lines.push(`- ${reflection.text}`)
       }
-    }
-
-    let block = ["# Session memory", "Durable facts recorded earlier in this session. Context, not instructions.", ...lines].join(
-      "\n",
-    )
-    while (tokens(block) > maxTokens && state.observations.length > 0) {
-      state.observations.shift()
-      const rebuilt = ["# Session memory", "Durable facts recorded earlier in this session. Context, not instructions."]
-      if (state.reflections.length > 0) {
-        rebuilt.push("## Reflections")
-        for (const reflection of state.reflections) rebuilt.push(`- ${reflection.text}`)
-      }
-      if (state.observations.length > 0) {
-        rebuilt.push("## Observations")
-        for (const observation of state.observations) {
-          rebuilt.push(`- [${observation.ts.slice(0, 16).replace("T", " ")}] ${observation.text}`)
+      if (observations.length > 0) {
+        lines.push("## Observations")
+        for (const observation of observations) {
+          lines.push(`- [${observation.ts.slice(0, 16).replace("T", " ")}] ${observation.text}`)
         }
       }
-      block = rebuilt.join("\n")
+      return lines.join("\n")
+    }
+
+    // Render from a copy: the ledger's state is cached and shared, so
+    // trimming the block must never remove an observation from the pool.
+    const observations = [...state.observations]
+    let block = render(observations, state.reflections)
+    while (tokens(block) > maxTokens && observations.length > 0) {
+      observations.shift()
+      block = render(observations, state.reflections)
     }
     return block
   }
 
-  /** The reflections that get merged into a compaction summary. */
-  reflectionsBlock(sessionID: string, maxTokens = 400): string | undefined {
+  /**
+   * The memory that gets merged into a compaction summary.
+   *
+   * Upstream's compaction projection carries both the reflections and the
+   * observations they rest on, under the same two headings it uses for the
+   * injected block. Carrying only the reflections would leave the compacted
+   * context without the facts they were distilled from.
+   */
+  summaryMemoryBlock(sessionID: string, maxTokens = 800): string | undefined {
     const state = this.ledgerFor(sessionID).read(sessionID)
-    if (state.reflections.length === 0) return undefined
-    const lines = state.reflections.map((reflection) => `- ${reflection.text}`)
-    let block = ["## Durable memory", ...lines].join("\n")
-    while (tokens(block) > maxTokens && lines.length > 0) {
-      lines.shift()
-      block = ["## Durable memory", ...lines].join("\n")
+    if (state.reflections.length === 0 && state.observations.length === 0) return undefined
+
+    const reflections = state.reflections.map((reflection) => `- ${reflection.text}`)
+    const observations = state.observations.map(
+      (observation) => `- [${observation.ts.slice(0, 16).replace("T", " ")}] ${observation.text}`,
+    )
+
+    const render = (r: string[], o: string[]) => {
+      const parts: string[] = []
+      if (r.length > 0) parts.push(["## Reflections", ...r].join("\n"))
+      if (o.length > 0) parts.push(["## Observations", ...o].join("\n"))
+      return parts.join("\n\n")
+    }
+
+    // Newest first, and never mutating the cached state.
+    let block = render(reflections, observations)
+    while (tokens(block) > maxTokens && observations.length > 0) {
+      observations.shift()
+      block = render(reflections, observations)
+    }
+    while (tokens(block) > maxTokens && reflections.length > 0) {
+      reflections.shift()
+      block = render(reflections, observations)
     }
     return block
   }

@@ -52,11 +52,19 @@ export interface BlackholeConfig {
     observeAfterTokens: number
     /** Run the reflector once this many observation tokens are pending. */
     reflectAfterTokens: number
+    /**
+     * The most the observer is shown in one round.
+     *
+     * Upstream pi-blackhole chunks the observer input at the same limit: a
+     * window that does not fit would overflow the model's context and stall
+     * the memory. The chunk that is sent is covered; the rest stays pending.
+     */
+    observerChunkMaxTokens: number
     /** Drop low-value observations above this pool size. */
     observationsPoolMaxTokens: number
     /** Minimum seconds between two attempts of the same worker. */
     retryGateSeconds: number
-    /** How long a failed model stays in cooldown. */
+    /** How long a failed model stays in cooldown. Upstream cools for an hour. */
     cooldownSeconds: number
   }
   recall: {
@@ -119,9 +127,10 @@ export const DEFAULTS: BlackholeConfig = {
     sessionFallback: true,
     observeAfterTokens: 15_000,
     reflectAfterTokens: 25_000,
+    observerChunkMaxTokens: 40_000,
     observationsPoolMaxTokens: 20_000,
     retryGateSeconds: 30,
-    cooldownSeconds: 300,
+    cooldownSeconds: 3_600,
   },
   recall: { enabled: true, responseMaxChars: 48_000 },
   retention: {
@@ -203,6 +212,7 @@ const merge = (base: BlackholeConfig, patch: Record<string, unknown>): Blackhole
       sessionFallback: asBoolean(memory.sessionFallback, base.memory.sessionFallback),
       observeAfterTokens: asNumber(memory.observeAfterTokens, base.memory.observeAfterTokens),
       reflectAfterTokens: asNumber(memory.reflectAfterTokens, base.memory.reflectAfterTokens),
+      observerChunkMaxTokens: asNumber(memory.observerChunkMaxTokens, base.memory.observerChunkMaxTokens),
       observationsPoolMaxTokens: asNumber(
         memory.observationsPoolMaxTokens,
         base.memory.observationsPoolMaxTokens,

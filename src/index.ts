@@ -307,13 +307,13 @@ export default Plugin.define({
         return
       }
 
-      // Durable reflections ride along with the summary, so a compaction never
+      // Durable memory rides along with the summary, so a compaction never
       // loses what the session learned.
       let summary = result.summary
       if (settings.memory.enabled) {
         try {
-          const reflections = memory.reflectionsBlock(event.sessionID)
-          if (reflections) summary = `${summary}\n\n${reflections}`
+          const block = memory.summaryMemoryBlock(event.sessionID)
+          if (block) summary = `${summary}\n\n${block}`
         } catch {
           // Reflections are an addition, never a reason to fail a compaction.
         }

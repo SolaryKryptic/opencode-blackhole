@@ -18,7 +18,8 @@ engine (both MIT).
 2. **Keeps durable memory across compactions.** A background observer records the
    facts worth keeping (decisions, preferences, constraints, completed work); a
    reflector distils them into durable insights. The memory is injected into the
-   system prompt on every request and merged into every compaction summary.
+   system prompt on every request, and both the reflections and the observations
+   they rest on ride along with every compaction summary.
 
 3. **Cuts token cost.** The summarizer call disappears; the summary is bounded by a
    token cap; the workers run on cheap or free models.
@@ -148,9 +149,10 @@ Plugin options in `opencode.json` win over a project file
           "sessionFallback": true,  // the session's model is the last resort
           "observeAfterTokens": 15000,
           "reflectAfterTokens": 25000,
+          "observerChunkMaxTokens": 40000,  // the most the observer sees at once
           "observationsPoolMaxTokens": 20000,
           "retryGateSeconds": 30,
-          "cooldownSeconds": 300
+          "cooldownSeconds": 3600
         },
         "recall": {
           "enabled": true,
@@ -178,6 +180,11 @@ session's model, because `sessionFallback` defaults to true, as upstream does).
 A model that fails gets a persisted cooldown and is skipped on later attempts; a
 stage that cannot run is skipped, and the coverage cursor never advances past
 what a worker actually saw — so nothing is lost, it is just observed later.
+
+The observer is shown at most `observerChunkMaxTokens` of the pending window at
+a time (upstream's limit). The chunk it reads is covered; the rest stays
+pending for the next round, and an answer the plugin cannot parse leaves the
+window pending rather than discarding it.
 
 Set `"sessionFallback": false` if you would rather the workers stop than run on
 your session's model: then a worker with no reachable model is skipped and the

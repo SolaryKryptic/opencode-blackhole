@@ -19,6 +19,8 @@ interface Harness {
   store: TranscriptStore
   prompts: string[]
   setResponse: (text: string) => void
+  /** Responses for successive calls; the last one repeats. */
+  setResponses: (texts: string[]) => void
 }
 
 const harness = (config: Partial<BlackholeConfig["memory"]> = {}): Harness => {
@@ -27,7 +29,7 @@ const harness = (config: Partial<BlackholeConfig["memory"]> = {}): Harness => {
   const ledger = new MemoryLedger(join(dir, "memory"))
   const cooldowns = new CooldownStore(dir)
   const prompts: string[] = []
-  let response = '{"observations":["a durable fact"]}'
+  let responses: string[] = ['{"observations":["a durable fact"]}']
 
   const settings: BlackholeConfig = {
     ...DEFAULTS,
@@ -40,14 +42,22 @@ const harness = (config: Partial<BlackholeConfig["memory"]> = {}): Harness => {
     config: () => settings,
     generate: async (_model, prompt) => {
       prompts.push(prompt)
-      return response
+      const index = Math.min(prompts.length - 1, responses.length - 1)
+      return responses[index]
     },
     sessionModel: async () => undefined,
     notify: () => {},
     log: () => {},
   })
 
-  return { manager, ledger, store, prompts, setResponse: (text) => (response = text) }
+  return {
+    manager,
+    ledger,
+    store,
+    prompts,
+    setResponse: (text) => (responses = [text]),
+    setResponses: (texts) => (responses = texts),
+  }
 }
 
 describe("observer coverage", () => {
@@ -110,7 +120,8 @@ describe("observer chunking", () => {
 
     await h.manager.onTurnEnd("s1")
 
-    expect(h.prompts.length).toBe(1)
+    // Two calls: the extraction, then the review of its draft.
+    expect(h.prompts.length).toBe(2)
     expect(h.ledger.read("s1").observedThrough).toBe(1)
   })
 
@@ -429,5 +440,133 @@ describe("observation pool budget", () => {
     await h.manager.onTurnEnd("s1")
 
     expect(h.ledger.read("s1").observations).toHaveLength(10)
+  })
+})
+
+describe("dropper proposal", () => {
+  const seed = (ledger: MemoryLedger, sessionID: string) => {
+    const observations = Array.from({ length: 6 }, (_, i) => ({
+      kind: "observation" as const,
+      id: `o${i}`,
+      ts: new Date(2026, 0, 1, 0, i).toISOString(),
+      text: `fact ${i} `.repeat(20),
+      tokens: 100,
+    }))
+    ledger.append(sessionID, observations)
+  }
+
+  test("the model's proposals decide what is dropped", async () => {
+    const h = harness({ observationsPoolMaxTokens: 400 })
+    seed(h.ledger, "s1")
+    // The model names o4 and o5; the pool needs two gone to reach the cap.
+    h.setResponse('{"drop":["o4","o5"]}')
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.observations.some((o) => o.id === "o4")).toBe(false)
+    expect(state.observations.some((o) => o.id === "o5")).toBe(false)
+    // The ones the model did not name are kept.
+    expect(state.observations.some((o) => o.id === "o0")).toBe(true)
+  })
+
+  test("a failed proposal falls back to the deterministic rule", async () => {
+    const h = harness({ observationsPoolMaxTokens: 400 })
+    seed(h.ledger, "s1")
+    h.setResponse("not json")
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    const poolTokens = state.observations.reduce((sum, o) => sum + o.tokens, 0)
+    expect(poolTokens).toBeLessThanOrEqual(400)
+  })
+
+  test("an unknown id in the proposal is ignored", async () => {
+    const h = harness({ observationsPoolMaxTokens: 400 })
+    seed(h.ledger, "s1")
+    h.setResponse('{"drop":["not_a_real_id","o5"]}')
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.observations.some((o) => o.id === "o5")).toBe(false)
+    expect(state.observations.length).toBe(5)
+  })
+
+  test("a pool under its cap never calls the model", async () => {
+    const h = harness({ observationsPoolMaxTokens: 10_000 })
+    seed(h.ledger, "s1")
+
+    await h.manager.onTurnEnd("s1")
+
+    // Only the observer ran; the dropper never asked anything.
+    expect(h.prompts.some((prompt) => prompt.includes("POOL"))).toBe(false)
+    expect(h.ledger.read("s1").observations).toHaveLength(6)
+  })
+})
+
+describe("observer second pass", () => {
+  test("the reviewed list replaces the draft", async () => {
+    const h = harness()
+    captureRequest(h.store, "s1", [user("m1", "we chose Postgres over SQLite")])
+    h.setResponses([
+      '{"observations":["the user chose a database"]}',
+      '{"observations":["the user chose Postgres over SQLite because of concurrent writes"]}',
+    ])
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.observations).toHaveLength(1)
+    expect(state.observations[0].text).toContain("concurrent writes")
+  })
+
+  test("a failed review keeps the draft", async () => {
+    const h = harness()
+    captureRequest(h.store, "s1", [user("m1", "we chose Postgres over SQLite")])
+    h.setResponses(['{"observations":["the draft fact"]}', "not json at all"])
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.observations).toHaveLength(1)
+    expect(state.observations[0].text).toBe("the draft fact")
+    // The chunk was still observed, so it is covered.
+    expect(state.observedThrough).toBe(1)
+  })
+
+  test("an empty review keeps the draft", async () => {
+    const h = harness()
+    captureRequest(h.store, "s1", [user("m1", "we chose Postgres over SQLite")])
+    h.setResponses(['{"observations":["the draft fact"]}', '{"observations":[]}'])
+
+    await h.manager.onTurnEnd("s1")
+
+    const state = h.ledger.read("s1")
+    expect(state.observations).toHaveLength(1)
+    expect(state.observations[0].text).toBe("the draft fact")
+  })
+
+  test("the review can be turned off", async () => {
+    const h = harness({ observerRefine: false })
+    captureRequest(h.store, "s1", [user("m1", "we chose Postgres over SQLite")])
+
+    await h.manager.onTurnEnd("s1")
+
+    expect(h.prompts.length).toBe(1)
+    expect(h.ledger.read("s1").observations).toHaveLength(1)
+  })
+
+  test("the review is asked for the draft and the transcript", async () => {
+    const h = harness()
+    captureRequest(h.store, "s1", [user("m1", "we chose Postgres over SQLite")])
+    h.setResponses(['{"observations":["a draft fact"]}', '{"observations":["a draft fact"]}'])
+
+    await h.manager.onTurnEnd("s1")
+
+    expect(h.prompts.length).toBe(2)
+    expect(h.prompts[1]).toContain("a draft fact")
+    expect(h.prompts[1]).toContain("we chose Postgres over SQLite")
   })
 })

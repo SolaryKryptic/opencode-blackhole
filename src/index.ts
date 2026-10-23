@@ -97,8 +97,10 @@ export default Plugin.define({
     /** Resolve a session's project, then return its state. */
     const ensure = async (sessionID: string) => stateFor(await resolveKey(sessionID))
 
-    const log = (kind: string, data: Record<string, unknown>) => {
-      if (config().logLevel === "off") return
+    /**
+     * Write one trace line. Failures here must never break a compaction.
+     */
+    const writeLog = (kind: string, data: Record<string, unknown>) => {
       try {
         // Keep the trace bounded: a long session would otherwise grow the log
         // without limit.
@@ -110,6 +112,37 @@ export default Plugin.define({
       } catch {
         // Logging must never break a compaction.
       }
+    }
+
+    const log = (kind: string, data: Record<string, unknown>) => {
+      if (config().logLevel === "off") return
+      writeLog(kind, data)
+    }
+
+    /**
+     * The outcome of a compaction, per session.
+     *
+     * A compaction that OpenCode wrote with its own model looks exactly like a
+     * normal compaction from the inside the session, so the decision is kept
+     * where it can be asked for.
+     */
+    const outcomes = new Map<
+      string,
+      { outcome: string; reason?: string; tokens?: number; at: string }
+    >()
+    const recordOutcome = (sessionID: string, outcome: string, reason?: string, tokens?: number) => {
+      outcomes.set(sessionID, { outcome, reason, tokens, at: new Date().toISOString() })
+    }
+
+    /**
+     * Compaction decisions are always written, whatever the log level is.
+     *
+     * They are rare (one per compaction) and they are the only trace of a
+     * compaction that handed itself back to OpenCode's summarizer - the one
+     * failure mode a user cannot otherwise see.
+     */
+    const logOutcome = (kind: string, data: Record<string, unknown>) => {
+      writeLog(kind, data)
     }
 
     const cooldowns = new CooldownStore(base)
@@ -274,82 +307,103 @@ export default Plugin.define({
     })()
 
     await ctx.session.hook("compaction", async (event) => {
-      // Another plugin already produced a summary — leave it alone.
-      if (event.result) return
-
-      const settings = config()
-      if (!settings.enabled || !settings.compaction.enabled) return
-
-      rememberModel(event.sessionID, (event as any).model)
-
-      const { store } = await ensure(event.sessionID)
-
-      // The compaction request carries the newest exchange OpenCode kept
-      // verbatim, which we have not seen in a request yet. Capturing it keeps
-      // the transcript complete at the point where it matters most.
-      try {
-        captureRequest(store, event.sessionID, event.messages as unknown[])
-      } catch (err) {
-        log("capture-failed", { sessionID: event.sessionID, error: String(err) })
-      }
-
-      const transcript = store.read(event.sessionID)
-      const resolveIndex = (id: string) => transcript.indexById.get(id)
-
-      // Authoritative file activity across the whole session, including the
-      // newest exchange OpenCode retained verbatim (it is not part of the
-      // summarization request).
-      let fileOps
-      try {
-        const blocks = normalize(transcript.messages.map((entry) => entry.message))
-        const files = extractFiles(blocks)
-        fileOps = {
-          readFiles: [...files.read],
-          modifiedFiles: [...files.modified],
-          createdFiles: [...files.created],
-        }
-      } catch {
-        fileOps = undefined
-      }
-
-      const result = buildSummary({
-        messages: event.messages as unknown[],
-        resolveIndex,
-        fileOps,
-        briefTokens: settings.compaction.brief ? settings.compaction.briefTokens : 0,
-        maxSummaryTokens: settings.compaction.maxSummaryTokens,
-        extraNote: settings.compaction.extraNote,
-      })
-
-      if (!result.summary) {
-        log("compaction-fallback", {
-          sessionID: event.sessionID,
-          reason: result.rejected,
-          messageCount: event.messages?.length ?? 0,
-        })
+      // Another plugin already produced a summary — leave it alone, but say
+      // so: a compaction we did not write is the one thing a user cannot see
+      // from the session itself.
+      if (event.result) {
+        recordOutcome(event.sessionID, "skipped", "another plugin produced a summary")
+        logOutcome("compaction-skipped", { sessionID: event.sessionID, reason: "another plugin produced a summary" })
         return
       }
 
-      // Durable memory rides along with the summary, so a compaction never
-      // loses what the session learned.
-      let summary = result.summary
-      if (settings.memory.enabled) {
-        try {
-          const block = memory.summaryMemoryBlock(event.sessionID)
-          if (block) summary = `${summary}\n\n${block}`
-        } catch {
-          // Reflections are an addition, never a reason to fail a compaction.
+      try {
+        const settings = config()
+        if (!settings.enabled || !settings.compaction.enabled) {
+          recordOutcome(event.sessionID, "disabled", "blackhole is disabled")
+          return
         }
-      }
 
-      event.result = { summary }
-      log("compaction", {
-        sessionID: event.sessionID,
-        model: event.model,
-        messageCount: event.messages?.length ?? 0,
-        summaryTokens: result.tokens,
-        hadPreviousSummary: Boolean(result.previousSummary),
-      })
+        rememberModel(event.sessionID, (event as any).model)
+
+        const { store } = await ensure(event.sessionID)
+
+        // The compaction request carries the newest exchange OpenCode kept
+        // verbatim, which we have not seen in a request yet. Capturing it keeps
+        // the transcript complete at the point where it matters most.
+        try {
+          captureRequest(store, event.sessionID, event.messages as unknown[])
+        } catch (err) {
+          log("capture-failed", { sessionID: event.sessionID, error: String(err) })
+        }
+
+        const transcript = store.read(event.sessionID)
+        const resolveIndex = (id: string) => transcript.indexById.get(id)
+
+        // Authoritative file activity across the whole session, including the
+        // newest exchange OpenCode retained verbatim (it is not part of the
+        // summarization request).
+        let fileOps
+        try {
+          const blocks = normalize(transcript.messages.map((entry) => entry.message))
+          const files = extractFiles(blocks)
+          fileOps = {
+            readFiles: [...files.read],
+            modifiedFiles: [...files.modified],
+            createdFiles: [...files.created],
+          }
+        } catch {
+          fileOps = undefined
+        }
+
+        const result = buildSummary({
+          messages: event.messages as unknown[],
+          resolveIndex,
+          fileOps,
+          briefTokens: settings.compaction.brief ? settings.compaction.briefTokens : 0,
+          maxSummaryTokens: settings.compaction.maxSummaryTokens,
+          extraNote: settings.compaction.extraNote,
+        })
+
+        if (!result.summary) {
+          // The safety valve: OpenCode's own summarizer takes over. Record it,
+          // because from the session this is invisible - it just looks like a
+          // slow, model-written summary.
+          recordOutcome(event.sessionID, "fallback", result.rejected ?? "no usable content")
+          logOutcome("compaction-fallback", {
+            sessionID: event.sessionID,
+            reason: result.rejected,
+            messageCount: event.messages?.length ?? 0,
+          })
+          return
+        }
+
+        // Durable memory rides along with the summary, so a compaction never
+        // loses what the session learned.
+        let summary = result.summary
+        if (settings.memory.enabled) {
+          try {
+            const block = memory.summaryMemoryBlock(event.sessionID)
+            if (block) summary = `${summary}\n\n${block}`
+          } catch {
+            // Reflections are an addition, never a reason to fail a compaction.
+          }
+        }
+
+        event.result = { summary }
+        recordOutcome(event.sessionID, "deterministic", undefined, result.tokens)
+        logOutcome("compaction", {
+          sessionID: event.sessionID,
+          model: event.model,
+          messageCount: event.messages?.length ?? 0,
+          summaryTokens: result.tokens,
+          hadPreviousSummary: Boolean(result.previousSummary),
+        })
+      } catch (err) {
+        // A bug here must never fail a compaction: leave the result unset and
+        // let OpenCode fall back to its own summarizer. Say what happened.
+        recordOutcome(event.sessionID, "error", String(err))
+        logOutcome("compaction-error", { sessionID: event.sessionID, error: String(err) })
+      }
     })
 
     // The recall tool: search the session transcript, including anything a
@@ -464,6 +518,14 @@ export default Plugin.define({
             `- pending: ~${status.pendingTokens} tokens`,
             `- state: ${projectStateDir(base, sessionKeys.get(sessionID) ?? fallbackKey)}`,
           ]
+          const last = outcomes.get(sessionID)
+          if (last) {
+            // Whether the last compaction was ours or OpenCode's own model is
+            // invisible from inside the session, so it is reported here.
+            const detail = last.reason ? ` (${last.reason})` : ""
+            const size = last.tokens ? `, ${last.tokens} tokens` : ""
+            lines.push(`- last compaction: ${last.outcome}${detail}${size} at ${last.at}`)
+          }
           if (state.observations.length > 0) {
             lines.push("", "## Observations")
             for (const observation of state.observations) lines.push(`- ${observation.text}`)

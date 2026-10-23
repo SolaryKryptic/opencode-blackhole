@@ -156,11 +156,11 @@ Plugin options in `opencode.json` win over a project file
           "dropperModel":   { "providerID": "openrouter", "id": "openrouter/free" },
           "observerFallbacks":  [],
           "reflectorFallbacks": [],
-          "dropperFallbacks":   [],
-          "sessionFallback": true,  // the session's model is the last resort
+          "dropperFallbacks":   [],          "sessionFallback": true,  // the session's model is the last resort
           "observeAfterTokens": 15000,
-          "reflectAfterTokens": 25000,
+          "reflectAfterTokens": 15000,  // upstream uses 25000; see the notes below
           "observerChunkMaxTokens": 40000,  // the most the observer sees at once
+          "observerRefine": true,  // a second pass reviews the observer's draft
           "observationsPoolMaxTokens": 20000,
           "retryGateSeconds": 30,
           "cooldownSeconds": 3600
@@ -198,6 +198,20 @@ pending for the next round, and an answer the plugin cannot parse leaves the
 window pending rather than discarding it. The reflector keeps its own cursor:
 each observation is crystallised once, so repeated runs cannot pile up
 duplicate reflections.
+
+**The observer runs two passes** (`observerRefine`, on by default). The first
+extracts a draft; the second sees that draft next to the same transcript and
+returns the corrected list — the facts the first pass missed, the ones it got
+wrong, the ones that were never durable. Upstream gets the same effect from
+its agent loop, which reads its own first batch back; OpenCode's plugin API
+has no tool loop, so the review is a second call instead. A review that fails
+or comes back empty keeps the draft, so the second pass can only improve
+things. It costs one more request per chunk against your worker model's
+limits — turn it off with `"observerRefine": false` to go back to one call.
+
+`reflectAfterTokens` is 15,000 rather than upstream's 25,000 because this
+port's observation pool is a hard delete at 20,000, while upstream's is a
+budget on the projection: at 25,000 the reflector could never fire here.
 
 Set `"sessionFallback": false` if you would rather the workers stop than run on
 your session's model: then a worker with no reachable model is skipped and the
@@ -245,11 +259,18 @@ happens without a summary.
 * **Provider-native compaction** (Claude/GPT server-side context management)
   bypasses the plugin hook entirely. Every other model — including everything
   served through OpenRouter — goes through the deterministic path.
-* **The dropper is deterministic.** Upstream asks a model which observations to
-  drop; this port drops the oldest unprotected ones instead, which costs nothing
-  and cannot delete something the model liked.
+* **The dropper proposes, a deterministic rule decides.** Upstream's dropper
+  asks a model which observations are safe to remove, then ranks whatever it
+  proposed and caps the count. This port does the same: one call proposes the
+  ids, and the deterministic rule still decides which of them actually go —
+  least supported first, oldest within a tier. When the model cannot be
+  reached, the rule alone prunes the pool, so the pool always falls under its
+  cap.
 * **Workers use one-shot structured calls.** OpenCode's plugin API has no
-  tool-calling loop, so the observer cannot refine its output in several passes.
+  tool-calling loop, so the observer cannot refine its output over several
+  turns. It gets a second pass instead: the draft comes back for review
+  against the same transcript, and the corrected list replaces it
+  (`observerRefine`).
 * **No interactive settings overlay** — the CLI plugin surface is out of scope.
 
 ---

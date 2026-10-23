@@ -66,6 +66,15 @@ export interface BlackholeConfig {
      * the memory. The chunk that is sent is covered; the rest stays pending.
      */
     observerChunkMaxTokens: number
+    /**
+     * Run a second pass over the observer's draft.
+     *
+     * Upstream's observer works in an agent loop: it records a batch, reads
+     * the result back, and corrects itself. OpenCode's plugin API has no
+     * tool loop, so the correction happens as a second call. It costs one
+     * more request per chunk and catches the facts a single pass misses.
+     */
+    observerRefine: boolean
     /** Drop low-value observations above this pool size. */
     observationsPoolMaxTokens: number
     /** Minimum seconds between two attempts of the same worker. */
@@ -134,6 +143,7 @@ export const DEFAULTS: BlackholeConfig = {
     observeAfterTokens: 15_000,
     reflectAfterTokens: 15_000,
     observerChunkMaxTokens: 40_000,
+    observerRefine: true,
     observationsPoolMaxTokens: 20_000,
     retryGateSeconds: 30,
     cooldownSeconds: 3_600,
@@ -219,6 +229,7 @@ const merge = (base: BlackholeConfig, patch: Record<string, unknown>): Blackhole
       observeAfterTokens: asNumber(memory.observeAfterTokens, base.memory.observeAfterTokens),
       reflectAfterTokens: asNumber(memory.reflectAfterTokens, base.memory.reflectAfterTokens),
       observerChunkMaxTokens: asNumber(memory.observerChunkMaxTokens, base.memory.observerChunkMaxTokens),
+    observerRefine: asBoolean(memory.observerRefine, base.memory.observerRefine),
       observationsPoolMaxTokens: asNumber(
         memory.observationsPoolMaxTokens,
         base.memory.observationsPoolMaxTokens,

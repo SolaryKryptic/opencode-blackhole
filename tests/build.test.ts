@@ -68,4 +68,54 @@ describe("buildSummary", () => {
     })
     expect(result.previousSummary).toContain("older goal")
   })
+
+  test("a checkpoint-only request still produces a summary", () => {
+    // The window since the last compaction held no new text, so the request
+    // carries the checkpoint and nothing else. Declining here would hand the
+    // compaction back to OpenCode's own summarizer - a model call this
+    // plugin exists to avoid.
+    const checkpoint = [
+      "<conversation-checkpoint>",
+      "<summary>\n[Session Goal]\n- the goal we had\n\n[Files And Changes]\n- Modified: src/a.ts\n</summary>",
+      "</conversation-checkpoint>",
+    ].join("\n")
+    const result = buildSummary({
+      messages: [{ id: "m0", role: "user", content: [{ type: "text", text: checkpoint }] }],
+      briefTokens: 2000,
+      maxSummaryTokens: 4000,
+    })
+    expect(result.rejected).toBeUndefined()
+    expect(result.summary).toBeDefined()
+    expect(result.summary).toContain("the goal we had")
+  })
+
+  test("a checkpoint-only request carries a foreign checkpoint forward", () => {
+    // A summary written by OpenCode's own summarizer has no sections we can
+    // merge. It is still a summary of the conversation, so it is carried
+    // forward rather than paying a model to rewrite it.
+    const checkpoint = [
+      "<conversation-checkpoint>",
+      "<summary>\n## Objective\n- do the thing\n</summary>",
+      "</conversation-checkpoint>",
+    ].join("\n")
+    const result = buildSummary({
+      messages: [{ id: "m0", role: "user", content: [{ type: "text", text: checkpoint }] }],
+      briefTokens: 2000,
+      maxSummaryTokens: 4000,
+    })
+    expect(result.rejected).toBeUndefined()
+    expect(result.summary).toContain("do the thing")
+  })
+
+  test("rejects a request with neither content nor a checkpoint", () => {
+    // The safety valve stays: with nothing to summarise at all, OpenCode's
+    // summarizer is better than an empty summary.
+    const result = buildSummary({
+      messages: [{ id: "m0", role: "user", content: [] }],
+      briefTokens: 2000,
+      maxSummaryTokens: 4000,
+    })
+    expect(result.summary).toBeUndefined()
+    expect(result.rejected).toBeTruthy()
+  })
 })

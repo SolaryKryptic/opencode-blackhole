@@ -14,7 +14,7 @@ import type { StoredMessage, TranscriptStore } from "../store/transcript"
 import type { Message } from "../vcc/pi-types"
 import { CooldownStore, runWithFallbacks } from "./models"
 import { MemoryLedger, type Observation, type Reflection } from "./ledger"
-import { OBSERVER_PROMPT, parseJson, REFLECTOR_PROMPT } from "./prompts"
+import { DROPPER_PROMPT, OBSERVER_PROMPT, OBSERVER_REFINE_PROMPT, parseJson, REFLECTOR_PROMPT } from "./prompts"
 
 const CHARS_PER_TOKEN = 4
 const tokens = (text: string) => Math.ceil(text.length / CHARS_PER_TOKEN)
@@ -209,7 +209,7 @@ export class MemoryManager {
       })
       await this.observe(sessionID, config)
       await this.reflect(sessionID, config)
-      this.drop(sessionID, config)
+      await this.drop(sessionID, config)
     } catch (error) {
       this.deps.log("memory-error", { sessionID, error: String(error) })
     } finally {
@@ -273,8 +273,16 @@ export class MemoryManager {
       return
     }
 
+    // The second pass: upstream's observer reads its own first batch back and
+    // corrects it inside the agent loop. There is no tool loop here, so the
+    // correction is a second call. A failed refinement keeps the draft.
+    const refined = config.memory.observerRefine
+      ? await this.refineObservations(sessionID, config, lines, rendered)
+      : undefined
+    const finalLines = refined?.length ? refined : lines
+
     const now = new Date().toISOString()
-    const observations: Observation[] = lines.map((text, i) => ({
+    const observations: Observation[] = finalLines.map((text, i) => ({
       id: `obs_${Date.now().toString(36)}_${i}`,
       ts: now,
       text,
@@ -285,10 +293,55 @@ export class MemoryManager {
     this.deps.log("observer", {
       sessionID,
       count: observations.length,
+      draft: lines.length,
       model: result.model,
       skipped: result.skipped.length,
       covered: chunk.length,
     })
+  }
+
+  /**
+   * The observer's second pass: check the draft against the transcript.
+   *
+   * Returns the corrected list, or undefined when the pass could not be used
+   * — the caller then keeps the draft, so a failed refinement never loses
+   * what the first pass found.
+   */
+  private async refineObservations(
+    sessionID: string,
+    config: BlackholeConfig,
+    draft: string[],
+    transcript: string,
+  ): Promise<string[] | undefined> {
+    const prompt = `${OBSERVER_REFINE_PROMPT}\n\n---\nDRAFT\n${draft.map((line) => `- ${line}`).join("\n")}\n---\nTRANSCRIPT\n${transcript}\n---`
+    const result = await runWithFallbacks({
+      models: [config.memory.observerModel, ...config.memory.observerFallbacks],
+      prompt,
+      call: (model, text) => this.deps.generate(model, text),
+      sessionModel: await this.deps.sessionModel(sessionID),
+      sessionFallback: config.memory.sessionFallback,
+      cooldowns: this.deps.cooldowns,
+      cooldownSeconds: config.memory.cooldownSeconds,
+      onFailure: (model, error) =>
+        this.deps.log("observer-refine-failed", { sessionID, model, error: String(error).slice(0, 200) }),
+    })
+    if (!result) {
+      this.deps.log("observer-refine-skipped", { sessionID, draft: draft.length })
+      return undefined
+    }
+    const parsed = parseJson<{ observations?: string[] }>(result.text)
+    if (parsed === undefined) {
+      this.deps.log("observer-refine-unreadable", { sessionID, model: result.model })
+      return undefined
+    }
+    const lines = (parsed.observations ?? []).map((line) => line.trim()).filter(Boolean)
+    if (lines.length === 0) {
+      // An empty correction would erase the draft, which is a worse outcome
+      // than an unreviewed draft.
+      this.deps.log("observer-refine-empty", { sessionID, model: result.model })
+      return undefined
+    }
+    return lines
   }
 
   /**
@@ -420,7 +473,7 @@ export class MemoryManager {
    * reflection evidence protects observations forever, so a pool of protected
    * observations would grow without bound.
    */
-  private drop(sessionID: string, config: BlackholeConfig) {
+  private async drop(sessionID: string, config: BlackholeConfig) {
     const state = this.ledgerFor(sessionID).read(sessionID)
     if (state.observations.length === 0) return
     const poolTokens = state.observations.reduce((sum, o) => sum + o.tokens, 0)
@@ -432,12 +485,27 @@ export class MemoryManager {
       for (const id of reflection.evidence) support.set(id, (support.get(id) ?? 0) + 1)
     }
 
+    // Upstream's dropper asks a model which observations are safe to remove
+    // and then ranks whatever it proposed. The model supplies the semantic
+    // judgement - duplicates, superseded facts, low-signal noise - that the
+    // deterministic rule cannot. When it cannot be reached, the rule below
+    // still prunes the pool.
+    const proposed = await this.proposeDrops(sessionID, config, state.observations, support)
+
     // Least supported first; oldest first within a tier.
-    const candidates = [...state.observations].sort((a, b) => {
+    const rank = (a: Observation, b: Observation) => {
       const bySupport = (support.get(a.id) ?? 0) - (support.get(b.id) ?? 0)
       if (bySupport !== 0) return bySupport
       return a.ts === b.ts ? a.id.localeCompare(b.id) : a.ts < b.ts ? -1 : 1
-    })
+    }
+
+    let candidates: Observation[]
+    if (proposed && proposed.length > 0) {
+      const wanted = new Set(proposed)
+      candidates = state.observations.filter((observation) => wanted.has(observation.id)).sort(rank)
+    } else {
+      candidates = [...state.observations].sort(rank)
+    }
 
     const drop: string[] = []
     let tokensLeft = poolTokens
@@ -451,7 +519,59 @@ export class MemoryManager {
       sessionID,
       drop.map((id) => ({ kind: "dropped" as const, id, ts: new Date().toISOString() })),
     )
-    this.deps.log("dropper", { sessionID, dropped: drop.length, poolTokens, tokensLeft })
+    this.deps.log("dropper", {
+      sessionID,
+      dropped: drop.length,
+      poolTokens,
+      tokensLeft,
+      proposed: proposed?.length,
+      selected: proposed && proposed.length > 0 ? "model" : "deterministic",
+    })
+  }
+
+  /**
+   * Ask the model which observations are safe to drop.
+   *
+   * Returns the ids it proposed, or undefined when the call could not be
+   * made or read - the caller then falls back to the deterministic rule.
+   */
+  private async proposeDrops(
+    sessionID: string,
+    config: BlackholeConfig,
+    observations: Observation[],
+    support: Map<string, number>,
+  ): Promise<string[] | undefined> {
+    const pool = observations
+      .map((observation) => {
+        const cited = support.get(observation.id) ?? 0
+        const coverage = cited === 0 ? "none" : cited === 1 ? "partial" : "strong"
+        return `- [${observation.id}] ${observation.ts.slice(0, 16).replace("T", " ")} [coverage: ${coverage}] ${observation.text}`
+      })
+      .join("\n")
+    const prompt = `${DROPPER_PROMPT}\n\n---\nPOOL\n${pool}\n---`
+    const result = await runWithFallbacks({
+      models: [config.memory.dropperModel, ...config.memory.dropperFallbacks],
+      prompt,
+      call: (model, text) => this.deps.generate(model, text),
+      sessionModel: await this.deps.sessionModel(sessionID),
+      sessionFallback: config.memory.sessionFallback,
+      cooldowns: this.deps.cooldowns,
+      cooldownSeconds: config.memory.cooldownSeconds,
+      onFailure: (model, error) =>
+        this.deps.log("dropper-failed", { sessionID, model, error: String(error).slice(0, 200) }),
+    })
+    if (!result) {
+      this.deps.log("dropper-skipped", { sessionID, pool: observations.length })
+      return undefined
+    }
+    const parsed = parseJson<{ drop?: string[] }>(result.text)
+    if (parsed === undefined) {
+      this.deps.log("dropper-unreadable", { sessionID, model: result.model })
+      return undefined
+    }
+    const known = new Set(observations.map((observation) => observation.id))
+    const ids = (parsed.drop ?? []).map((id) => id.trim()).filter((id) => known.has(id))
+    return ids
   }
 
   /** The memory block injected into the system prompt. */

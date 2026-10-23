@@ -136,7 +136,14 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
   if (!Array.isArray(messages) || messages.length === 0) return { rejected: "no messages" }
 
   const adapted = adaptMessages(messages as any[], { resolveIndex })
-  if (adapted.messages.length === 0) return { rejected: "no conversation content" }
+  // A compaction request can carry the previous checkpoint and nothing else:
+  // the window since the last compaction held no new text. That is not an
+  // empty conversation - the checkpoint *is* the conversation now. Upstream
+  // merges the checkpoint's sections in this case; declining it hands the
+  // compaction back to OpenCode's own summarizer, which is the one thing
+  // this plugin exists to prevent.
+  const previous = adapted.previousSummary?.trim()
+  if (adapted.messages.length === 0 && !previous) return { rejected: "no conversation content" }
 
   // Chars-per-token: heuristic unless the caller can calibrate. OpenCode does
   // not expose the last request's token usage to plugins, so we use the
@@ -178,6 +185,17 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
 
   const hasSections = SECTION_MARKERS.some((marker) => head.includes(marker))
   if (!hasSections && brief.length === 0) {
+    // Nothing new to extract. The previous checkpoint still summarises the
+    // conversation, so it is carried forward rather than paying a model to
+    // rewrite it.
+    if (previous) {
+      const carried = rewriteRecallNote(previous)
+      return {
+        summary: carried,
+        tokens: estimateTokensFromChars(carried.length, charsPerToken),
+        previousSummary: adapted.previousSummary,
+      }
+    }
     return { rejected: "extraction produced no usable content", previousSummary: adapted.previousSummary }
   }
 

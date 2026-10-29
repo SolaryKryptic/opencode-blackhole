@@ -158,7 +158,7 @@ Plugin options in `opencode.json` win over a project file
           "briefTokens": 2000,      // token budget for the brief, when enabled
           "maxSummaryTokens": 4000, // hard cap for the whole summary
           "extraNote": "",          // extra text appended to every summary
-          "handoff": true,          // one model call for the narrative block
+          "handoff": false,          // one model call for the narrative block
           "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
           "handoffFallbacks": [],
           "handoffMaxTokens": 900,      // budget for the block itself

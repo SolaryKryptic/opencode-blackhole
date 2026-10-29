@@ -1,6 +1,6 @@
 {
   "name": "opencode-blackhole",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Deterministic compaction + observational memory for OpenCode. Replaces the native LLM summarizer with a zero-cost structural summary, and keeps durable session memory across compactions.",
   "type": "module",
   "license": "MIT",
@@ -16,8 +16,6 @@
   },
   "files": [
     "dist/",
-    "src/",
-    "index.ts",
     "README.md",
     "LICENSE",
     "LICENSE.vendor"
@@ -34,8 +32,8 @@
     "opencode": ">=2.0.28"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin",
-    "dev": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin --watch",
+    "build": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin --external jsonc-parser",
+    "dev": "bun build src/index.ts --outfile dist/server.js --target node --format esm --external @opencode/plugin --external jsonc-parser --watch",
     "test": "bun test ./tests",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test ./tests && bun run build",
@@ -43,7 +41,8 @@
     "prepublishOnly": "bun run check"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.0.32"
+    "@opencode/plugin": "^2.0.32",
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

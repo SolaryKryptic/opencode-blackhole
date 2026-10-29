@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { parse } from "jsonc-parser"
 
 export interface ModelRef {
   providerID: string
@@ -149,7 +150,7 @@ export const DEFAULTS: BlackholeConfig = {
     briefTokens: 2_000,
     maxSummaryTokens: 4_000,
     extraNote: "",
-    handoff: true,
+    handoff: false,
     handoffModel: DEFAULT_WORKER_MODEL,
     handoffFallbacks: [],
     handoffMaxTokens: 900,
@@ -199,7 +200,8 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const readJson = (path: string): Record<string, unknown> | undefined => {
   try {
     if (!existsSync(path)) return undefined
-    const parsed = JSON.parse(readFileSync(path, "utf8"))
+    const content = readFileSync(path, "utf8")
+    const parsed = parse(content, [], { allowTrailingComma: true })
     return isObject(parsed) ? parsed : undefined
   } catch {
     return undefined
@@ -296,7 +298,14 @@ const merge = (base: BlackholeConfig, patch: Record<string, unknown>): Blackhole
   }
 }
 
-const globalConfigPath = () => join(homedir(), ".config", "opencode", "blackhole.json")
+const globalConfigPath = () => {
+  const base = join(homedir(), ".config", "opencode")
+  const json = join(base, "blackhole.json")
+  if (existsSync(json)) return json
+  const jsonc = join(base, "blackhole.jsonc")
+  if (existsSync(jsonc)) return jsonc
+  return json // default to .json for new writes
+}
 
 export interface LoadOptions {
   /** Project directory (the plugin's location directory). */
@@ -309,7 +318,10 @@ export const loadConfig = ({ directory, options }: LoadOptions): BlackholeConfig
   let config = DEFAULTS
   const global = readJson(globalConfigPath())
   if (global) config = merge(config, global)
-  const project = readJson(join(directory, ".opencode", "blackhole.json"))
+  const projectDir = join(directory, ".opencode")
+  const projectJson = join(projectDir, "blackhole.json")
+  const projectJsonc = join(projectDir, "blackhole.jsonc")
+  const project = readJson(existsSync(projectJson) ? projectJson : projectJsonc)
   if (project) config = merge(config, project)
   if (isObject(options)) config = merge(config, options)
   return config

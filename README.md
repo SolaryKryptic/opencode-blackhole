@@ -172,7 +172,7 @@ Plugin options in `opencode.json` win over a project file
           "dropperModel":   { "providerID": "openrouter", "id": "openrouter/free" },
           "observerFallbacks":  [],
           "reflectorFallbacks": [],
-          "dropperFallbacks":   [],          "sessionFallback": true,  // the session's model is the last resort
+          "dropperFallbacks":   [],          "sessionFallback": true,  // the session's model is the last resort (does not work on opencode free models)
           "observeAfterTokens": 15000,
           "reflectAfterTokens": 15000,  // upstream uses 25000; see the notes below
           "observerChunkMaxTokens": 40000,  // the most the observer sees at once

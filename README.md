@@ -8,12 +8,15 @@ engine (both MIT).
 
 **What it does**
 
-1. **Replaces OpenCode's LLM summarizer with a zero-cost structural summary.**
+1. **Replaces OpenCode's LLM summarizer with a structured checkpoint.**
    OpenCode's compaction calls the model to write a prose summary, then compacts
    that summary, and the next one — details erode over a long session. This plugin
-   answers OpenCode's `compaction` hook with a deterministic extraction instead:
-   goal, files, commits, preferences, outstanding context and a ranked brief
-   transcript. **No model call, no drift.**
+   answers OpenCode's `compaction` hook itself. The inventory is extracted
+   deterministically — goal, files, commits, preferences, outstanding context,
+   with exact paths, commands and identifiers — and one small model call writes
+   the part no extractor can: `[Decisions]` (and why), `[Work State]`,
+   `[Next Move]` and `[Important Context]`. If that call fails, the deterministic
+   summary is used unchanged.
 
 2. **Keeps durable memory across compactions.** A background observer records the
    facts worth keeping (decisions, preferences, constraints, completed work); a
@@ -21,8 +24,8 @@ engine (both MIT).
    system prompt on every request, and both the reflections and the observations
    they rest on ride along with every compaction summary.
 
-3. **Cuts token cost.** The summarizer call disappears; the summary is bounded by a
-   token cap; the workers run on cheap or free models.
+3. **Cuts token cost.** One bounded call replaces the summarizer's, the summary
+   has a hard token cap, and the workers run on cheap or free models.
 
 ---
 
@@ -31,7 +34,7 @@ engine (both MIT).
 ### One command
 
 ```sh
-opencode plugin add @solkry/opencode-blackhole
+opencode plugin add opencode-blackhole
 ```
 
 That is the whole install. OpenCode fetches the package from the npm registry,
@@ -42,7 +45,7 @@ global configuration — no `pnpm add`, no manual config editing.
 opencode plugin list      # see it
 opencode plugin check     # check for updates
 opencode plugin update    # update it
-opencode plugin remove @solkry/opencode-blackhole
+opencode plugin remove opencode-blackhole
 ```
 
 Restart OpenCode (or `/reload`) afterwards.
@@ -56,7 +59,7 @@ If you prefer to edit the config yourself, add it to your **global** config
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["@solkry/opencode-blackhole"]
+  "plugins": ["opencode-blackhole"]
 }
 ```
 
@@ -64,7 +67,7 @@ To remove it, prefix the name with `-` (it is applied last, so it also
 cancels an auto-discovered copy):
 
 ```jsonc
-{ "plugins": ["-@solkry/opencode-blackhole"] }
+{ "plugins": ["-opencode-blackhole"] }
 ```
 
 ### From a local checkout
@@ -105,7 +108,7 @@ tier, give OpenRouter a key; to keep them off your main model entirely, set
 {
   "plugins": [
     {
-      "package": "@solkry/opencode-blackhole",
+      "package": "opencode-blackhole",
       "options": {
         "memory": {
           "observerModel": { "providerID": "openai", "id": "gpt-4.1-mini" },
@@ -124,9 +127,15 @@ configure. Two caveats:
 - OpenCode's **free-tier models cannot be called from a plugin** ("OpenCode's
   free tier can only be used from within OpenCode"), so if your session model is
   one of those, it is not usable as the fallback. Use a provider model.
-- A worker model that is not in the catalog is skipped without a cooldown; one
-  that fails for a fixable reason (bad key, rejected payload) is cooled down
-  and the chain moves on to the next candidate.
+- A worker model that is not in the catalog is skipped without a cooldown. A
+  transient failure (rate limit, timeout, an upstream provider error behind a
+  router) is retried once on the same model, then cooled down for three minutes
+  — a router like `openrouter/free` picks a provider per request, so the retry
+  usually lands somewhere else. A deterministic failure (bad key, rejected
+  payload) is cooled for the full `cooldownSeconds` and the chain moves on to
+  the next candidate.
+- When a stage ends with no model at all, the session gets one notice with the
+  last error, so a busy upstream is not mistaken for a missing key.
 
 ---
 
@@ -145,9 +154,16 @@ Plugin options in `opencode.json` win over a project file
         "enabled": true,
         "compaction": {
           "enabled": true,
-          "briefTokens": 2000,      // token budget for the brief transcript
+          "brief": false,           // keep the ranked transcript tail (duplicates OpenCode's kept tail)
+          "briefTokens": 2000,      // token budget for the brief, when enabled
           "maxSummaryTokens": 4000, // hard cap for the whole summary
-          "extraNote": ""           // extra text appended to every summary
+          "extraNote": "",          // extra text appended to every summary
+          "handoff": true,          // one model call for the narrative block
+          "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
+          "handoffFallbacks": [],
+          "handoffMaxTokens": 900,      // budget for the block itself
+          "handoffInputMaxTokens": 12000, // how much conversation the prompt carries
+          "handoffTimeoutSeconds": 120  // past this, keep the deterministic summary
         },
         "memory": {
           "enabled": true,
@@ -223,7 +239,7 @@ session says so once.
 
 | Command | Description |
 | --- | --- |
-| `/blackhole` | Compact now with the deterministic summary (no model call) |
+| `/blackhole` | Compact now with blackhole's checkpoint (no summarizer call) |
 | `/blackhole-recall <query>` | Search this session's history (`page:N`, `scope:all`, `#N:path`) |
 | `/blackhole-memory` | Show the memory status: observations, reflections, pending tokens |
 | `/blackhole-export [out:<path>.md]` | Export the session's memory as markdown |
@@ -245,6 +261,24 @@ OpenCode's compaction hook fires for automatic compaction, overflow recovery and
 `/compact`. The plugin answers it with a summary, and OpenCode skips its own
 summarizer call — the compaction message then carries a zero-usage summary plus
 OpenCode's own verbatim tail.
+
+The summary has two halves. The **sections** are extracted from the transcript
+without a model: session goal, files read/modified/created, commits, user
+preferences, outstanding context. They hold exact paths and identifiers but say
+nothing about *why* a thing was done. The **handoff block** is one model call for
+exactly that gap — `[Decisions]`, `[Work State]`, `[Next Move]`,
+`[Important Context]` — placed after the sections and before the recall note.
+
+The block is additive: a failed, slow (past `handoffTimeoutSeconds`) or
+unparseable response leaves the deterministic summary untouched. When the model
+is unreachable, a smaller block is derived without one: the work state from the
+commits, the modified-file count and the last command, plus the question the
+session ended on. It never guesses a decision. Turn the whole thing off with
+`"handoff": false` to get the purely deterministic summary.
+
+The brief transcript (`"brief": true`) is off by default: OpenCode already keeps
+the newest exchange verbatim, so the brief mostly duplicates it. It remains
+useful if you compact very long sessions on a model with a small kept tail.
 
 If the extraction produces nothing usable, the plugin leaves the hook result
 unset and OpenCode falls back to its native summarizer. A compaction never

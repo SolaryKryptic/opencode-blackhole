@@ -2,13 +2,22 @@ import { Plugin } from "@opencode/plugin"
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { buildSummary } from "./compaction/build"
-import { loadConfig, type BlackholeConfig } from "./config"
+import {
+  buildHandoffPrompt,
+  cleanHandoff,
+  fallbackHandoff,
+  insertBlock,
+  renderWindow,
+  withTimeout,
+} from "./compaction/handoff"
+import { loadConfig, type BlackholeConfig, type ModelRef } from "./config"
 import { captureRequest } from "./store/capture"
 import { TranscriptStore } from "./store/transcript"
 import { normalize } from "./vcc/core/normalize"
+import { DEFAULT_CHARS_PER_TOKEN, estimateTokensFromChars } from "./vcc/core/token-estimate"
 import { extractFiles } from "./vcc/extract/files"
 import { runRecallCommand, runRecallTool } from "./recall/recall"
-import { CooldownStore } from "./memory/models"
+import { CooldownStore, runWithFallbacks } from "./memory/models"
 import { MemoryLedger } from "./memory/ledger"
 import { MemoryManager } from "./memory/manager"
 import { directoryKey, listProjectDirs, projectStateDir, stateBase } from "./state/paths"
@@ -238,14 +247,111 @@ export default Plugin.define({
       return undefined
     }
 
+    /** The one way this plugin calls a model. */
+    const generate = async (model: ModelRef, prompt: string) => {
+      const result = await ctx.generate.text({ model, prompt })
+      return result.text
+    }
+
+    /**
+     * The handoff block: one model call for the narrative half of the
+     * checkpoint - decisions and why, where the work stands, what happens
+     * next, and the facts that are expensive to rediscover.
+     *
+     * Returns undefined when the call fails or times out; the deterministic
+     * summary is a valid checkpoint on its own. When the model is unreachable
+     * a smaller block is derived without one, so a checkpoint still says
+     * where the work stands.
+     */
+    const runHandoff = async (options: {
+      sessionID: string
+      messages: readonly unknown[]
+      sections: string
+      previousSummary?: string
+    }): Promise<string | undefined> => {
+      const settings = config()
+      const inputChars = Math.max(4_000, Math.round(settings.compaction.handoffInputMaxTokens * 4))
+      const previousChars = Math.min(options.previousSummary?.length ?? 0, Math.floor(inputChars * 0.4))
+      const sectionChars = Math.min(options.sections.length, Math.floor(inputChars * 0.25))
+      const windowChars = Math.max(2_000, inputChars - previousChars - sectionChars)
+      const prompt = buildHandoffPrompt({
+        previousSummary: options.previousSummary?.slice(0, previousChars),
+        sections: options.sections.slice(0, sectionChars),
+        window: renderWindow(options.messages, windowChars),
+      })
+
+      let model: string | undefined
+      // The block shares the summary budget with the deterministic sections,
+      // so it can never push the checkpoint past the hard cap on its own.
+      const blockBudget =
+        Math.max(
+          400,
+          Math.min(settings.compaction.handoffMaxTokens, Math.floor(settings.compaction.maxSummaryTokens / 2)),
+        ) * 4
+
+      // One deadline for every attempt: a model that is slow must not hold
+      // compaction open for the timeout once per retry.
+      const deadline = Date.now() + settings.compaction.handoffTimeoutSeconds * 1_000
+      const attemptOnce = async () => {
+        const remaining = deadline - Date.now()
+        if (remaining < 1_000) return undefined
+        const run = await withTimeout(
+          runWithFallbacks({
+            models: [settings.compaction.handoffModel, ...settings.compaction.handoffFallbacks],
+            prompt,
+            call: generate,
+            sessionModel: await sessionModel(options.sessionID),
+            sessionFallback: settings.memory.sessionFallback,
+            cooldowns,
+            cooldownSeconds: settings.memory.cooldownSeconds,
+            onFailure: (failed, error, retryable) =>
+              log("handoff-model-failed", {
+                sessionID: options.sessionID,
+                model: `${failed.providerID}/${failed.id}`,
+                retryable,
+                error: String(error).slice(0, 200),
+              }),
+          }),
+          remaining,
+        )
+        if (run) model = `${run.model.providerID}/${run.model.id}`
+        return run
+      }
+
+      let run = await attemptOnce()
+      let block = run ? cleanHandoff(run.text, blockBudget) : undefined
+      // A reasoning model can spend the whole output budget thinking and
+      // return no text at all. The free router picks a provider per request,
+      // so one retry normally lands somewhere else; the deadline still wins.
+      if (!block && run && deadline - Date.now() > 5_000) {
+        log("handoff-retry", { sessionID: options.sessionID, model })
+        run = await attemptOnce()
+        block = run ? cleanHandoff(run.text, blockBudget) : undefined
+      }
+      if (block) {
+        log("handoff", { sessionID: options.sessionID, model, chars: block.length })
+        return block
+      }
+
+      const fallback = fallbackHandoff({
+        summary: options.sections,
+        messages: options.messages,
+        previousSummary: options.previousSummary,
+      })
+      log("handoff-fallback", {
+        sessionID: options.sessionID,
+        model,
+        chars: fallback?.length ?? 0,
+        reason: run ? "unusable response" : "no model answered",
+      })
+      return fallback
+    }
+
     const memory = new MemoryManager({
       state,
       cooldowns,
       config,
-      generate: async (model, prompt) => {
-        const result = await ctx.generate.text({ model, prompt })
-        return result.text
-      },
+      generate,
       sessionModel,
       notify: (sessionID, text) => {
         void ctx.session.synthetic({ sessionID, text })
@@ -364,7 +470,28 @@ export default Plugin.define({
           extraNote: settings.compaction.extraNote,
         })
 
-        if (!result.summary) {
+        // The handoff block: the narrative the deterministic sections cannot
+        // carry. Additive - a failed call leaves the deterministic summary
+        // untouched - and a carried checkpoint has nothing new to narrate.
+        let handoff: string | undefined
+        if (settings.compaction.handoff && !result.carried) {
+          try {
+            handoff = await runHandoff({
+              sessionID: event.sessionID,
+              messages: event.messages as unknown[],
+              sections: result.summary ?? "",
+              previousSummary: result.previousSummary,
+            })
+          } catch (err) {
+            // Never a reason to fail a compaction.
+            log("handoff-error", { sessionID: event.sessionID, error: String(err) })
+          }
+        }
+
+        let summary = result.summary
+        if (handoff) summary = summary ? insertBlock(summary, handoff) : handoff
+
+        if (!summary) {
           // The safety valve: OpenCode's own summarizer takes over. Record it,
           // because from the session this is invisible - it just looks like a
           // slow, model-written summary.
@@ -373,13 +500,13 @@ export default Plugin.define({
             sessionID: event.sessionID,
             reason: result.rejected,
             messageCount: event.messages?.length ?? 0,
+            handoff: Boolean(handoff),
           })
           return
         }
 
         // Durable memory rides along with the summary, so a compaction never
         // loses what the session learned.
-        let summary = result.summary
         if (settings.memory.enabled) {
           try {
             const block = memory.summaryMemoryBlock(event.sessionID)
@@ -389,13 +516,21 @@ export default Plugin.define({
           }
         }
 
+        const tokens = estimateTokensFromChars(summary.length, DEFAULT_CHARS_PER_TOKEN)
         event.result = { summary }
-        recordOutcome(event.sessionID, "deterministic", undefined, result.tokens)
+        recordOutcome(
+          event.sessionID,
+          result.summary ? "deterministic" : "handoff-only",
+          handoff ? "with handoff block" : undefined,
+          tokens,
+        )
         logOutcome("compaction", {
           sessionID: event.sessionID,
           model: event.model,
           messageCount: event.messages?.length ?? 0,
-          summaryTokens: result.tokens,
+          summaryTokens: tokens,
+          handoff: Boolean(handoff),
+          handoffOnly: !result.summary,
           hadPreviousSummary: Boolean(result.previousSummary),
         })
       } catch (err) {
@@ -485,7 +620,7 @@ export default Plugin.define({
     await ctx.command.transform((editor) => {
       editor.add({
         name: "blackhole",
-        description: "Compact this session now with blackhole's deterministic summary (no model call)",
+        description: "Compact this session now with blackhole's checkpoint (no summarizer call)",
         execute: async ({ sessionID }) => {
           await ctx.session.compact({ sessionID })
         },

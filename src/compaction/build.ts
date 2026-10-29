@@ -7,6 +7,7 @@
  * so OpenCode falls back to its own summarizer.
  */
 import { adaptMessages } from "../adapter/opencode-messages"
+import { stripHandoff } from "./handoff"
 import { compileRanked } from "../vcc/core/summarize"
 import {
   calibrateCharsPerToken,
@@ -40,6 +41,8 @@ export interface BuildSummaryResult {
   tokens?: number
   /** The previous checkpoint's summary, when the request started with one. */
   previousSummary?: string
+  /** True when the previous checkpoint was reused because nothing new was in the window. */
+  carried?: boolean
   /** Why the summary was rejected, when it was. */
   rejected?: string
 }
@@ -149,12 +152,31 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
   // not expose the last request's token usage to plugins, so we use the
   // conservative default and let the token cap do the real work.
   const charsPerToken = DEFAULT_CHARS_PER_TOKEN
-  const briefChars = Math.max(400, Math.round(briefTokens * charsPerToken))
+
+  // A request that carries only the previous checkpoint has nothing new to
+  // summarise. Rebuilding it from its own sections was both wasteful and the
+  // source of the stacked handoff blocks: the rebuilt checkpoint looked like
+  // "fresh" content, so the hook appended another block every time.
+  if (adapted.messages.length === 0 && previous) {
+    const carried = rewriteRecallNote(previous)
+    return {
+      summary: carried,
+      tokens: estimateTokensFromChars(carried.length, charsPerToken),
+      previousSummary: adapted.previousSummary,
+      carried: true,
+    }
+  }
+  // 0 (or less) means no brief at all: do not pay for a floor the caller
+  // explicitly turned off.
+  const briefChars = briefTokens <= 0 ? 0 : Math.max(400, Math.round(briefTokens * charsPerToken))
 
   let summary = compileRanked({
     messages: adapted.messages,
     sourceIndices: adapted.sourceIndices,
-    previousSummary: adapted.previousSummary,
+    // The handoff block is not a section: strip it before merging so a
+    // section that has no fresh counterpart cannot carry the whole block
+    // forward verbatim. The raw checkpoint still goes to the handoff prompt.
+    previousSummary: previous ? stripHandoff(previous) : undefined,
     fileOps,
     ranking: {
       maxBriefChars: briefChars,
@@ -170,6 +192,7 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
   })
 
   let { head, brief, note } = splitSummary(summary)
+  if (briefTokens <= 0) brief = ""
 
   // Enforce the hard cap: the brief transcript is trimmed first, then the
   // section bullets, and only then is the summary rejected outright.
@@ -194,6 +217,7 @@ export const buildSummary = (input: BuildSummaryInput): BuildSummaryResult => {
         summary: carried,
         tokens: estimateTokensFromChars(carried.length, charsPerToken),
         previousSummary: adapted.previousSummary,
+        carried: true,
       }
     }
     return { rejected: "extraction produced no usable content", previousSummary: adapted.previousSummary }

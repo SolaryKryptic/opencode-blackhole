@@ -117,17 +117,20 @@ export class MemoryManager {
    * never written. One line in the session says what is missing and how to
    * fix it.
    */
-  private noticeNoModel(sessionID: string, stage: string, model: ModelRef, config: BlackholeConfig) {
+  private noticeNoModel(sessionID: string, stage: string, model: ModelRef, reason?: string) {
     const key = `${sessionID}:${stage}`
     if (this.notified.has(key)) return
     this.notified.add(key)
     this.deps.log(`${stage}-no-model`, { sessionID, model })
     // Some catalogs already carry the provider in the id ("openrouter/free").
     const full = model.id.startsWith(`${model.providerID}/`) ? model.id : `${model.providerID}/${model.id}`
+    // A router can fail because an upstream provider did, which is a very
+    // different problem from a missing key. Say which one it was.
+    const detail = reason ? `: ${reason}` : ""
     this.deps.notify?.(
       sessionID,
       [
-        `**Blackhole: the ${stage} has no model to run on** (\`${full}\` failed).`,
+        `**Blackhole: the ${stage} has no model to run on** (\`${full}\` failed${detail}).`,
         "",
         "Compaction is unaffected — summaries are still free and deterministic.",
         "Memory needs a model of its own. Either:",
@@ -235,6 +238,7 @@ export class MemoryManager {
     if (!rendered.trim()) return
 
     const prompt = `${OBSERVER_PROMPT}\n\n---\nTRANSCRIPT\n${rendered}\n---`
+    let lastError: string | undefined
     const result = await runWithFallbacks({
       models: [config.memory.observerModel, ...config.memory.observerFallbacks],
       prompt,
@@ -243,12 +247,15 @@ export class MemoryManager {
       sessionFallback: config.memory.sessionFallback,
       cooldowns: this.deps.cooldowns,
       cooldownSeconds: config.memory.cooldownSeconds,
-      onFailure: (model, error) =>
-        this.deps.log("observer-failed", { sessionID, model, error: String(error).slice(0, 200) }),
+      onFailure: (model, error) => {
+        const message = String(error)
+        if (!message.includes("in cooldown:")) lastError = `${model.providerID}/${model.id}: ${message.slice(0, 140)}`
+        this.deps.log("observer-failed", { sessionID, model, error: message.slice(0, 200) })
+      },
     })
     if (!result) {
       this.deps.log("observer-skipped", { sessionID, pendingTokens })
-      this.noticeNoModel(sessionID, "observer", config.memory.observerModel, config)
+      this.noticeNoModel(sessionID, "observer", config.memory.observerModel, lastError)
       return
     }
 
@@ -402,6 +409,7 @@ export class MemoryManager {
     const listed = review.map((observation) => `- [${observation.id}] ${observation.text}`).join("\n")
     const prompt = `${REFLECTOR_PROMPT}\n\n---\nOBSERVATIONS\n${listed}\n---`
 
+    let lastError: string | undefined
     const result = await runWithFallbacks({
       models: [config.memory.reflectorModel, ...config.memory.reflectorFallbacks],
       prompt,
@@ -410,12 +418,15 @@ export class MemoryManager {
       sessionFallback: config.memory.sessionFallback,
       cooldowns: this.deps.cooldowns,
       cooldownSeconds: config.memory.cooldownSeconds,
-      onFailure: (model, error) =>
-        this.deps.log("reflector-failed", { sessionID, model, error: String(error).slice(0, 200) }),
+      onFailure: (model, error) => {
+        const message = String(error)
+        if (!message.includes("in cooldown:")) lastError = `${model.providerID}/${model.id}: ${message.slice(0, 140)}`
+        this.deps.log("reflector-failed", { sessionID, model, error: message.slice(0, 200) })
+      },
     })
     if (!result) {
       this.deps.log("reflector-skipped", { sessionID })
-      this.noticeNoModel(sessionID, "reflector", config.memory.reflectorModel, config)
+      this.noticeNoModel(sessionID, "reflector", config.memory.reflectorModel, lastError)
       return
     }
 

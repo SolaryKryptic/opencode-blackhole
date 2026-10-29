@@ -27,7 +27,13 @@ export interface BlackholeConfig {
   /** Deterministic compaction: replace the model's own summarizer. */
   compaction: {
     enabled: boolean
-    /** Keep the vcc brief transcript (the ranked tail of the conversation). */
+    /**
+     * Keep the vcc brief transcript (the ranked tail of the conversation).
+     *
+     * Off by default: OpenCode keeps the newest exchange verbatim either way,
+     * and the brief duplicates it at a real token cost. The handoff block is
+     * the better use of the budget.
+     */
     brief: boolean
     /** Token budget for the brief transcript. */
     briefTokens: number
@@ -35,6 +41,25 @@ export interface BlackholeConfig {
     maxSummaryTokens: number
     /** Extra instruction appended to the summary, e.g. project conventions. */
     extraNote: string
+    /**
+     * Spend one model call on the handoff block: decisions and why, work
+     * state, next move, and the context that is expensive to rediscover.
+     *
+     * The deterministic sections are an inventory; they cannot say what was
+     * decided or what happens next. This block is additive - when the call
+     * fails, the deterministic summary is used unchanged.
+     */
+    handoff: boolean
+    /** The model that writes the handoff block. */
+    handoffModel: ModelRef
+    /** Extra models to try when the primary handoff model fails. */
+    handoffFallbacks: ModelRef[]
+    /** Token budget for the handoff block itself. */
+    handoffMaxTokens: number
+    /** How much conversation the handoff prompt may carry. */
+    handoffInputMaxTokens: number
+    /** Give up on the handoff after this long and keep the deterministic summary. */
+    handoffTimeoutSeconds: number
   }
   memory: {
     enabled: boolean
@@ -120,10 +145,16 @@ export const DEFAULTS: BlackholeConfig = {
   enabled: true,
   compaction: {
     enabled: true,
-    brief: true,
+    brief: false,
     briefTokens: 2_000,
     maxSummaryTokens: 4_000,
     extraNote: "",
+    handoff: true,
+    handoffModel: DEFAULT_WORKER_MODEL,
+    handoffFallbacks: [],
+    handoffMaxTokens: 900,
+    handoffInputMaxTokens: 12_000,
+    handoffTimeoutSeconds: 120,
   },
   memory: {
     enabled: true,
@@ -210,6 +241,14 @@ const merge = (base: BlackholeConfig, patch: Record<string, unknown>): Blackhole
       briefTokens: asNumber(compaction.briefTokens, base.compaction.briefTokens),
       maxSummaryTokens: asNumber(compaction.maxSummaryTokens, base.compaction.maxSummaryTokens),
       extraNote: asString(compaction.extraNote, base.compaction.extraNote),
+      handoff: asBoolean(compaction.handoff, base.compaction.handoff),
+      handoffModel: asModelRef(compaction.handoffModel) ?? base.compaction.handoffModel,
+      handoffFallbacks: compaction.handoffFallbacks
+        ? asModelRefs(compaction.handoffFallbacks)
+        : base.compaction.handoffFallbacks,
+      handoffMaxTokens: asNumber(compaction.handoffMaxTokens, base.compaction.handoffMaxTokens),
+      handoffInputMaxTokens: asNumber(compaction.handoffInputMaxTokens, base.compaction.handoffInputMaxTokens),
+      handoffTimeoutSeconds: asNumber(compaction.handoffTimeoutSeconds, base.compaction.handoffTimeoutSeconds),
     },
     memory: {
       enabled: asBoolean(memory.enabled, base.memory.enabled),

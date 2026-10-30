@@ -141,7 +141,7 @@ configure. Two caveats:
 
 ## Configuration
 
-Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.jsonc`), which wins over the global file (`~/.config/opencode/blackhole.jsonc`), which wins over the defaults.
+All plugin configuration goes in `~/.config/opencode/blackhole.jsonc` (or a project's `.opencode/blackhole.jsonc`).
 
 ```jsonc
 {
@@ -152,7 +152,7 @@ Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.
     "briefTokens": 2000,      // token budget for the brief, when enabled
     "maxSummaryTokens": 4000, // hard cap for the whole summary
     "extraNote": "",          // extra text appended to every summary
-    "handoff": true,          // one model call for the narrative block
+    "handoff": false,          // one model call for the narrative block
     "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
     "handoffFallbacks": [],
     "handoffMaxTokens": 900,      // budget for the block itself
@@ -190,7 +190,7 @@ Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.
     "maxMessageChars": 262144,  // cap on a single stored message
     "maxLedgerBytes": 65536     // a ledger is compacted past this
   },
-  "logLevel": "debug" // "info" | "debug" writes a JSONL trace
+  "logLevel": "off" // "info" | "debug" writes a JSONL trace
 }
 ```
 

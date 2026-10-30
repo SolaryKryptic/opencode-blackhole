@@ -160,7 +160,7 @@ All plugin configuration goes in `~/.config/opencode/blackhole.jsonc` (or a proj
     "handoffTimeoutSeconds": 120  // past this, keep the deterministic summary
   },
   "memory": {
-    "enabled": true,
+    "enabled": true, // set false to use just the instant compaction half and turn off model calls
     "observerModel":  { "providerID": "openrouter", "id": "openrouter/free" },
     "reflectorModel": { "providerID": "openrouter", "id": "openrouter/free" },
     "dropperModel":   { "providerID": "openrouter", "id": "openrouter/free" },

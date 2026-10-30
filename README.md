@@ -167,7 +167,7 @@ All plugin configuration goes in `~/.config/opencode/blackhole.jsonc` (or a proj
     "observerFallbacks":  [],
     "reflectorFallbacks": [],
     "dropperFallbacks":   [],
-    "sessionFallback": true,  // the session's model is the last resort
+    "sessionFallback": true,  // the session's model is the last resort (doesn't work with opencode free models)
     "observeAfterTokens": 15000,
     "reflectAfterTokens": 15000,  // upstream uses 25000; see the notes below
     "observerChunkMaxTokens": 40000,  // the most the observer sees at once

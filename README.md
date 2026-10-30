@@ -141,7 +141,7 @@ configure. Two caveats:
 
 ## Configuration
 
-Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.json`), which wins over the global file (`~/.config/opencode/blackhole.json`), which wins over the defaults.
+Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.jsonc`), which wins over the global file (`~/.config/opencode/blackhole.jsonc`), which wins over the defaults.
 
 ```jsonc
 {
@@ -152,7 +152,7 @@ Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.
     "briefTokens": 2000,      // token budget for the brief, when enabled
     "maxSummaryTokens": 4000, // hard cap for the whole summary
     "extraNote": "",          // extra text appended to every summary
-    "handoff": false,          // one model call for the narrative block
+    "handoff": true,          // one model call for the narrative block
     "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
     "handoffFallbacks": [],
     "handoffMaxTokens": 900,      // budget for the block itself
@@ -191,60 +191,6 @@ Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.
     "maxLedgerBytes": 65536     // a ledger is compacted past this
   },
   "logLevel": "debug" // "info" | "debug" writes a JSONL trace
-=======
-  "plugins": [
-    {
-      "package": "opencode-blackhole",
-      "options": {
-        "enabled": true,
-        "compaction": {
-          "enabled": true,
-          "brief": false,           // keep the ranked transcript tail (duplicates OpenCode's kept tail)
-          "briefTokens": 2000,      // token budget for the brief, when enabled
-          "maxSummaryTokens": 4000, // hard cap for the whole summary
-          "extraNote": "",          // extra text appended to every summary
-          "handoff": false,          // one model call for the narrative block
-          "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
-          "handoffFallbacks": [],
-          "handoffMaxTokens": 900,      // budget for the block itself
-          "handoffInputMaxTokens": 12000, // how much conversation the prompt carries
-          "handoffTimeoutSeconds": 120  // past this, keep the deterministic summary
-        },
-        "memory": {
-          "enabled": true,
-          "observerModel":  { "providerID": "openrouter", "id": "openrouter/free" },
-          "reflectorModel": { "providerID": "openrouter", "id": "openrouter/free" },
-          "dropperModel":   { "providerID": "openrouter", "id": "openrouter/free" },
-          "observerFallbacks":  [],
-          "reflectorFallbacks": [],
-          "dropperFallbacks":   [],          "sessionFallback": true,  // the session's model is the last resort (does not work on opencode free models)
-          "observeAfterTokens": 15000,
-          "reflectAfterTokens": 15000,  // upstream uses 25000; see the notes below
-          "observerChunkMaxTokens": 40000,  // the most the observer sees at once
-          "observerRefine": true,  // a second pass reviews the observer's draft
-          "observationsPoolMaxTokens": 20000,
-          "retryGateSeconds": 30,
-          "cooldownSeconds": 3600
-        },
-        "recall": {
-          "enabled": true,
-          "responseMaxChars": 48000  // 0 = unbounded
-        },
-        "retention": {
-          "transcriptDays": 7,   // 0 = keep forever
-          "memoryDays": 90,      // the ledger holds the session's memory
-          "logDays": 7
-        },
-        "limits": {
-          "maxCachedSessions": 8,     // parsed sessions kept in memory
-          "maxMessageChars": 262144,  // cap on a single stored message
-          "maxLedgerBytes": 65536     // a ledger is compacted past this
-        },
-        "logLevel": "off" // "info" | "debug" writes a JSONL trace
-      }
-    }
-  ]
->>>>>>> 108e248b19cdb9187bbe9657050788f40b1aab58
 }
 ```
 

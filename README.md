@@ -152,7 +152,7 @@ All plugin configuration goes in `~/.config/opencode/blackhole.jsonc` (or a proj
     "briefTokens": 2000,      // token budget for the brief, when enabled
     "maxSummaryTokens": 4000, // hard cap for the whole summary
     "extraNote": "",          // extra text appended to every summary
-    "handoff": false,          // one model call for the narrative block
+    "handoff": false,          // set to true for better compaction quality (won't be instant anymore)
     "handoffModel": { "providerID": "openrouter", "id": "openrouter/free" },
     "handoffFallbacks": [],
     "handoffMaxTokens": 900,      // budget for the block itself

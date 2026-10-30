@@ -1,6 +1,6 @@
 {
   "name": "opencode-blackhole",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Deterministic compaction + observational memory for OpenCode. Replaces the native LLM summarizer with a zero-cost structural summary, and keeps durable session memory across compactions.",
   "type": "module",
   "license": "MIT",

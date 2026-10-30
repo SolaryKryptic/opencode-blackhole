@@ -145,7 +145,6 @@ Plugin options in `opencode.json` win over a project file (`.opencode/blackhole.
 
 ```jsonc
 {
-<<<<<<< HEAD
   "enabled": true,
   "compaction": {
     "enabled": true,
